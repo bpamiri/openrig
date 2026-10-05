@@ -24,7 +24,18 @@ import type { OutboundPostPayload } from "./outbound-driver.js";
 
 export interface SubsystemSlackDeliveryOpts {
   botToken: string;
+  /** The default channel: every post goes here unless resolveChannel names another. */
   channel: string;
+  /** #192: the channel for this payload (the channel map). Absent = `channel` for every post.
+   *  Post, reconcile scan and upload all use the one resolved channel. */
+  resolveChannel?: (payload: OutboundPostPayload) => string;
+  /** #192: decide a post's channel ONCE, at its first attempt, and record it in `attempted`;
+   *  every retry or replay of that post reuses it, so the channel/thread pair always names one
+   *  conversation and reconciliation scans where the first attempt went. A recorded channel is
+   *  honoured whenever present. A post already attempted without a record (its first attempt ran
+   *  before any map existed) retries in the default `channel`, where it went. With pinChannel off
+   *  (no map) nothing is recorded and the channel is resolved as before. */
+  pinChannel?: boolean;
   sourceLabel: string; // host/box/rig — from config, never hardcoded (item 7)
   bodyExcerpt?: number;
   fetchImpl?: FetchImpl;
@@ -39,10 +50,12 @@ export interface SubsystemSlackDeliveryOpts {
   /** Release the outbound driver's in-flight guard once an episode is durably seen. */
   release?: (notificationKey: string) => void;
   /** E (thread routing): resolve the thread anchor for this payload; undefined = new root.
-   *  Wired by the thread-seat map; absent in the pre-routing composition. */
-  resolveThreadTs?: (payload: OutboundPostPayload) => string | undefined;
-  /** E: record a NEW root's ts so the conversation threads from here on. */
-  onPostedRoot?: (payload: OutboundPostPayload, ts: string) => void;
+   *  Wired by the thread-seat map; absent in the pre-routing composition. `channel` is the
+   *  channel this attempt posts to, so a thread is only ever chosen within it. */
+  resolveThreadTs?: (payload: OutboundPostPayload, channel: string) => string | undefined;
+  /** E: record a NEW root's ts (and the channel it was posted in) so the conversation threads
+   *  from here on. */
+  onPostedRoot?: (payload: OutboundPostPayload, ts: string, channel: string) => void;
   /** Receipt hook for every successful post, root or threaded. */
   onPosted?: (payload: OutboundPostPayload, messageTs: string, threadTs?: string) => void;
   /** OPR.0.5.6.14 — the transport-failure receipt hook: a failed post writes
@@ -70,6 +83,23 @@ const LOCAL_ATTACHMENT_EXT = new Set([...LOCAL_IMAGE_EXT, ".mp4", ".webm", ".mov
 export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 export type LocalAttachment = { bytes: Uint8Array; filename: string } | { skipped: string };
 const TRANSPORT_FAILURE_RECEIPT_PREFIX = "::transport-failure-receipt::";
+/** #192: `<decisionId>::channel::<channel>` in the attempted store = the channel this post's first
+ *  attempt was decided for (see pinChannel). Keyed like the transport-failure receipt. */
+const CHANNEL_DECIDED_PREFIX = "::channel::";
+
+function decidedChannel(attempted: Set<string>, decisionId: string): string | undefined {
+  const prefix = `${decisionId}${CHANNEL_DECIDED_PREFIX}`;
+  for (const key of attempted.keys()) if (key.startsWith(prefix)) return key.slice(prefix.length) || undefined;
+  return undefined;
+}
+
+/** The channel this post's first attempt went to, if it has had one: its recorded channel, or, with
+ *  a map now configured (pinChannel) but no record, the default channel. A post attempted before the
+ *  map existed went where unmapped posts go, so its retries stay there. Undefined = not attempted yet
+ *  (or no map): resolve as usual. */
+function firstAttemptChannel(opts: SubsystemSlackDeliveryOpts, attempted: Set<string>, decisionId: string): string | undefined {
+  return decidedChannel(attempted, decisionId) ?? (opts.pinChannel && attempted.has(decisionId) ? opts.channel : undefined);
+}
 const TRANSPORT_FAILURE_RECEIPT_REPAIRED = "::repaired";
 
 function transportFailureReceiptKey(decisionId: string, failureClass: string, detail: string): string {
@@ -205,7 +235,19 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         reconcileMarker: reconcileToken(decision.decisionId),
       },
     );
-    const threadTs = opts.resolveThreadTs?.(q);
+    // #192: the channel first, from this post's record when it has one, so the thread below is
+    // chosen inside the channel the post actually goes to (and went to, on a retry).
+    const pinned = firstAttemptChannel(opts, opts.attempted.load(), decision.decisionId);
+    const channel = pinned ?? opts.resolveChannel?.(q) ?? opts.channel;
+    if (!pinned && opts.pinChannel) {
+      try {
+        opts.attempted.mark(`${decision.decisionId}${CHANNEL_DECIDED_PREFIX}${channel}`, "channel-decided");
+      } catch (e) {
+        log(`channel record FAILED for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained, nothing posted`);
+        return { ok: false, class: "channel-unrecorded", detail: (e as Error).message };
+      }
+    }
+    const threadTs = opts.resolveThreadTs?.(q, channel);
 
     // A failed HTTP outcome whose row-receipt write failed is held in the
     // existing restart-surviving attempted store. Repair that authoritative
@@ -244,7 +286,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
     if (attempted.has(decision.decisionId)) {
-      const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
+      const scan = await fetchRecentMessageTexts(opts.botToken, channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
       if (!scan.ok) {
         log(`reconcile scan failed for ${decision.decisionId} (${scan.error}) — retained, no blind repost`);
         return { ok: false, class: "reconcile-unreadable", detail: scan.error };
@@ -262,7 +304,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // receipt: a throwing receipt write retains the decision for the next
           // replay (the marker stays findable; no repost can occur).
           try {
-            if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts);
+            if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts, channel);
             opts.onPosted?.(q, matched.ts, threadTs);
           } catch (e) {
             log(`receipt write FAILED on reconcile for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained for the next replay`);
@@ -293,7 +335,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     opts.attempted.mark(decision.decisionId, "attempted");
     const res = await postChatMessage(
       opts.botToken,
-      { channel: opts.channel, text: payload.text, blocks: payload.blocks, thread_ts: threadTs },
+      { channel, text: payload.text, blocks: payload.blocks, thread_ts: threadTs },
       opts.fetchImpl,
     );
     if (!res.ok) {
@@ -340,7 +382,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // (never an escaped throw); the replay reconciles by marker — the message
     // IS in the channel — and retries the idempotent receipt without reposting.
     try {
-      if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+      if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts, channel);
       opts.onPosted?.(q, res.ts, threadTs);
     } catch (e) {
       log(`receipt write FAILED after successful post for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained; replay reconciles by marker and retries the idempotent receipt`);
@@ -375,7 +417,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           const done = await completeUploadExternal(
             opts.botToken,
             // #300: the title is shown in Slack like the text, so it gets the same secret redaction.
-            { files: [{ id: up.fileId, title: redactSecrets(q.summary ?? local.filename) }], channelId: opts.channel, threadTs: intoThread },
+            { files: [{ id: up.fileId, title: redactSecrets(q.summary ?? local.filename) }], channelId: channel, threadTs: intoThread },
             opts.fetchImpl,
           );
           if (done.ok) log(`uploaded ${local.filename} into thread ${intoThread ?? "(root)"} for ${q.qitemId ?? decision.decisionId}`);
@@ -443,6 +485,11 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         ...opts,
         resolveMentionUserId: index === 0 ? opts.resolveMentionUserId : undefined,
         resolveThreadTs: index === 0 ? opts.resolveThreadTs : () => primary!.threadTs ?? primary!.messageTs,
+        // #192: a supplemental part goes where the primary went (its recorded channel), never to a
+        // channel re-resolved after a remap; without a record, resolution as before.
+        resolveChannel: index === 0
+          ? opts.resolveChannel
+          : (part) => firstAttemptChannel(opts, opts.attempted.load(), partId(0)) ?? opts.resolveChannel?.(part) ?? opts.channel,
         onPostedRoot: index === 0 ? opts.onPostedRoot : undefined,
         onPosted: (_part, messageTs, threadTs) => {
           if (index !== 0) return;
