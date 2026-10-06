@@ -66,6 +66,12 @@ export function isCleanCommanderExit(err: unknown): boolean {
   );
 }
 
+/** Commander's own errors carry a `commander.*` code and are already written via writeErr. */
+function isCommanderError(err: unknown): boolean {
+  const code = (err as CommanderLikeError)?.code;
+  return typeof code === "string" && code.startsWith("commander.");
+}
+
 export function formatCliError(err: unknown): { ok: false; error: { code: string; message: string } } {
   const e = err as CommanderLikeError;
   const message = (e?.message ?? String(err)).replace(/^error:\s*/i, "").trim();
@@ -180,8 +186,12 @@ export async function runProgram(program: Command, argv: string[], io: RunProgra
     const code = (e as CommanderLikeError)?.exitCode ?? 1;
     if (json) {
       out(JSON.stringify(formatCliError(e)));
+    } else if (!isCommanderError(e)) {
+      // Commander writes its own errors through configureOutput.writeErr above. Anything else
+      // (a plain Error from an option parser or an action) reaches here unprinted; say it, so a
+      // human run never fails silently.
+      err(`error: ${formatCliError(e).error.message}`);
     }
-    // (non-JSON plain text was already emitted via configureOutput.writeErr above)
     exit(code || 1);
     return code || 1;
   }
