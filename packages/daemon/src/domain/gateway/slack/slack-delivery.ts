@@ -63,9 +63,10 @@ export interface SubsystemSlackDeliveryOpts {
   onPosted?: (payload: OutboundPostPayload, messageTs: string, threadTs?: string) => void;
   /** #899 — receipt hook for every message posted (or reconciled) into a thread: a long ask's reply
    *  parts, a later notification in an ask's own thread, an ask posted into another thread. The payload
-   *  names the ask and its seat, so a reaction on that message can reach them. A throw retains the
+   *  names the ask and its seat, and `channel` the channel the message was posted to (#192), so a
+   *  reaction on that message can reach them. A throw retains the
    *  delivery like any receipt failure; the replay reconciles the message by marker and records it again. */
-  onPostedPart?: (payload: OutboundPostPayload, messageTs: string, threadTs: string) => void;
+  onPostedPart?: (payload: OutboundPostPayload, messageTs: string, threadTs: string, channel: string) => void;
   /** OPR.0.5.6.14 — the transport-failure receipt hook: a failed post writes
    *  the row's transport-failed ledger transition (class + API error), so a
    *  delivery failure is as legible on the row as a success. `partlyPosted` marks an ask whose
@@ -287,7 +288,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // replay (the marker stays findable; no repost can occur).
           try {
             if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts, channel);
-            else opts.onPostedPart?.(q, matched.ts, threadTs);
+            else opts.onPostedPart?.(q, matched.ts, threadTs, channel);
             opts.onPosted?.(q, matched.ts, threadTs);
           } catch (e) {
             log(`receipt write FAILED on reconcile for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained for the next replay`);
@@ -396,7 +397,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // IS in the channel — and retries the idempotent receipt without reposting.
     try {
       if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts, channel);
-      else opts.onPostedPart?.(q, res.ts, threadTs);
+      else opts.onPostedPart?.(q, res.ts, threadTs, channel);
       opts.onPosted?.(q, res.ts, threadTs);
     } catch (e) {
       log(`receipt write FAILED after successful post for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained; replay reconciles by marker and retries the idempotent receipt`);
@@ -481,7 +482,11 @@ async function firstMessageMayHaveLanded(
   if ([...attempted.keys()].some((key) => key.startsWith(`${decisionId}::primary-receipt::`))) return "found";
   if (!attempted.has(firstId)) return "absent";
   const marker = reconcileToken(firstId);
-  const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, opts.resolveThreadTs?.(q, opts.channel), opts.fetchImpl, undefined, undefined, marker);
+  // #192: look where the first message went: its first attempt's channel, with the same precedence
+  // a supplemental part uses (recorded, else this ask's channel, else the default), and that
+  // channel's thread. With no map this is the default channel, as before.
+  const channel = firstAttemptChannel(opts, attempted, firstId) ?? opts.resolveChannel?.(q) ?? opts.channel;
+  const scan = await fetchRecentMessageTexts(opts.botToken, channel, opts.resolveThreadTs?.(q, channel), opts.fetchImpl, undefined, undefined, marker);
   if (!scan.ok) return { unreadable: scan.error ?? "reconcile scan failed" };
   if (scan.messages.some((m) => m.text.includes(marker))) return "found";
   return scan.incomplete ? "maybe" : "absent";

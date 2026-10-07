@@ -382,6 +382,22 @@ describe("#192 channel map through the real Slack wire", () => {
     expect(repo.getById(update.qitemId)?.replyToFallback).toMatch(/^root-other-channel/);
   });
 
+  it("a mapped long ask records its reply parts in the mapped channel, so a reaction there finds the ask", async () => {
+    rewire(MAP);
+    const longBody = Array.from({ length: 12 }, (_, i) => `Paragraph ${i + 1}: the plan needs a yes. `.repeat(20)).join("\n\n");
+    const pr = await ask("pr@my-rig", { body: longBody });
+    await deliver(pr.qitemId);
+    expect(posts.length).toBeGreaterThan(2);
+    expect(new Set(posts.map((p) => p.channel))).toEqual(new Set(["C0EXAMPLE2"]));
+    const map = new ThreadSeatMap(db);
+    for (let n = 2; n <= posts.length; n++) {
+      expect(map.partOf(`${n}.1`, "C0EXAMPLE2")).toMatchObject({ threadTs: "1.1", seat: "pr@my-rig", conversationId: pr.qitemId });
+      expect(map.partOf(`${n}.1`, "C0DEFAULT")).toBeNull();
+    }
+    const stamps = repo.transitionLog.listForQitem(pr.qitemId).map((t) => t.transitionNote ?? "").map(parsePostedStamp).filter(Boolean);
+    expect(stamps.every((st) => st!.channel === "C0EXAMPLE2")).toBe(true);
+  });
+
   it("an aggregate digest has no seat and posts to the default channel", async () => {
     rewire(MAP);
     const member = await ask("pr@my-rig");
