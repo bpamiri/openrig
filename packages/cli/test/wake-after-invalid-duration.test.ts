@@ -2,7 +2,7 @@
 // Before: `rig queue block <id> --on <blocker> --wake-after 7d` exited 1 with no output in a human
 // run, so the owner believed the row was parked with a wake when nothing was parked.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import { createProgram } from "../src/index.js";
 import { runProgram } from "../src/cli-error.js";
 import type { QueueDeps } from "../src/commands/queue.js";
@@ -125,6 +125,28 @@ describe("runProgram: no thrown error is silent in a human run", () => {
     expect(exitCode).toBe(1);
     expect(err).toEqual([]);
     expect(out).toEqual(['{"ok":false,"error":{"code":"cli_error","message":"something broke"}}']);
+  });
+
+  // A CommanderError that an ACTION throws is not written by Commander (only the errors Commander
+  // raises itself are), so it must be printed here too, exactly once.
+  const throwingInvalid = () => {
+    const program = new Command("rig");
+    program.command("boom").option("--json").action(() => { throw new InvalidArgumentError("the value is not usable here"); });
+    return program;
+  };
+
+  it("an InvalidArgumentError thrown inside an action is written to stderr once, exit 1", async () => {
+    const { out, err, exitCode } = await runCli(throwingInvalid(), ["boom"]);
+    expect(exitCode).toBe(1);
+    expect(out).toEqual([]);
+    expect(err).toEqual(["error: the value is not usable here"]);
+  });
+
+  it("--json for an action's InvalidArgumentError is the commander.invalidArgument object only", async () => {
+    const { out, err, exitCode } = await runCli(throwingInvalid(), ["boom", "--json"]);
+    expect(exitCode).toBe(1);
+    expect(err).toEqual([]);
+    expect(out).toEqual(['{"ok":false,"error":{"code":"commander.invalidArgument","message":"the value is not usable here"}}']);
   });
 
   it("Commander's own errors are printed exactly once", async () => {
