@@ -434,9 +434,13 @@ describe("RestoreOrchestrator", () => {
       undefined,
       node.id,
       "high",
+      false, // unchanged non-interruptive setting
+      false, // this is not the kernel
+      true, // derived team launch default
     );
 
-    // Codex forwards effort
+    // Codex forwards effort; the named profile remains authoritative.
+    db.prepare("UPDATE nodes SET codex_config_profile = 'profile1' WHERE id = ?").run(node.id);
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(
       node.id,
@@ -1855,7 +1859,7 @@ describe("RestoreOrchestrator", () => {
         expect(tmux.createSession).toHaveBeenCalledTimes(1);
         if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
         expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
-        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume ${token}`));
+        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume '${token}'`));
         expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
       }
     });

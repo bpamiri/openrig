@@ -24,7 +24,9 @@ rig doctor --json
 ```
 
 Use the installed command's `--help` if an option is unavailable. Read the diagnostic findings; don't treat them as
-instructions to reset the machine. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
+instructions to reset the machine. `rig doctor` checks Claude and Codex authentication using the same local checks
+as setup, including a configured Codex provider credential variable. A set variable does not prove that the provider accepts it or that managed
+seats receive it. Doctor does not run an agent task: also inspect `rig ps --nodes --rig <rig>`. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
 and recent output.
 
 **If OpenRig won't install or `rig` won't run, start here anyway.** Record the attempted package version, install
@@ -34,9 +36,11 @@ help.
 ## Match the guidance to the installed version
 
 The reference documents beside this file describe the version they were installed with. GitHub's default branch can
-contain changes that haven't reached your user's version. For release notes and known limitations, open
+contain changes that haven't reached your user's version. After an upgrade, start with the short note on what changed
+in the installed version: `rig context get reference/whats-new.md`. For full release notes and known limitations, open
 `https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version number from
-`rig --version` (without the commit it may show in parentheses). If the matching document isn't available, say so
+`rig --version` (without the commit it may show in parentheses). When that file doesn't exist, use the version's
+section of `https://github.com/mvschwarz/openrig/blob/v<version>/CHANGELOG.md`. If neither is available, say so
 rather than treating a newer command as installed.
 
 ## Find your next step
@@ -44,8 +48,16 @@ rather than treating a newer command as installed.
 ### Installation or platform problems
 
 Supported platforms are macOS and Linux. Native Windows is not supported yet, and WSL2 has not been tested. OpenRig needs
-Node.js 22 or 24 and tmux. A WSL error needs its actual versions, commands and error text; don't assume a
-Windows-related pull request fixes it.
+Node.js 22 or 24 and tmux. A Linux distribution's own Node.js can be older; check `node --version`. With npm 11 or
+later, an `npm warn install-scripts` line for `@openrig/cli` means only the postinstall Node.js and SQLite check was
+skipped; `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. A WSL error needs its actual versions,
+commands and error text; don't assume a Windows-related pull request fixes it.
+
+The one-command install ([getting-started](getting-started.md#install-and-sign-in)) prints its plan with
+`--dry-run` and changes nothing. When a step fails it prints `FAILED [n/4] <command or check> (exit <code>)` and
+stops. Read its diagnostic: if it names a runnable command, run that command by hand for the full error and record it
+in a report; otherwise follow the accompanying diagnostic. If the only remaining failures are provider sign-ins under
+"Some steps need attention", the install steps finished: sign in to each selected provider and continue.
 
 ### Installation finished, but there is nobody to talk to
 

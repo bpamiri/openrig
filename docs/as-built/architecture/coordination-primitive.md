@@ -10,7 +10,7 @@ applies-when: |
   transactional handoff guarantee, or where queue closure is enforced.
 siblings: [workflow-runtime.md, mission-control.md, daemon-core.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -24,7 +24,7 @@ filesystem path remains untouched, and the daemon-backed `rig queue` /
 only to SQLite (`packages/cli/src/commands/queue.ts:19`,
 `packages/cli/src/commands/stream.ts:11`).
 
-> Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. Each count below sits beside the
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -126,7 +126,7 @@ commit (`queue-repository.ts:1404`–`1416`, `:1467`–`1475`). The returned
 `lastNudgeResult` is therefore normally null; `rig queue show <id>` reads the
 wake result later. If create cannot retain the intent, the task is still saved
 and the row records `failed:wake not retained: <reason>`. Startup reconciles
-and drains intents left pending by a crash once (`startup.ts:2334`–`2335`).
+and drains intents left pending by a crash once (`startup.ts:2338`–`2339`).
 `maybeNudge` remains only as the path for a repository with no outbox.
 
 The standing detector in `queue-stuck-sweep.ts` creates findings through the
@@ -343,9 +343,10 @@ Every write route derives its actor through `requireSenderIdentity`
 (`routes/require-sender-identity.ts:76`): the `X-OpenRig-Session` header wins
 over a body actor. On a direct request from a known origin it is recorded as
 `transport:v1`; `resolveRecordedProvenance` (`:199`) instead records
-`origin-unknown:v1` when the origin-unknown marker is set, `relay:v1` for a
-relayed request that carried `transport:v1`, and `claimed:v1` for other relayed
-requests. Without the header, the
+`origin-unknown:v1` when the origin-unknown marker is set or a relayed request
+carried `origin-unknown:v1` (`:207`), `relay:v1` for a relayed request that
+carried `transport:v1`, and `claimed:v1` for other relayed requests. Without the
+header, the
 body actor is recorded as `claimed:v1`; with neither (or, for inbox drop,
 without the header) the route answers 400 `actor_required`. The stamp lands in
 `identity_provenance` on transitions, inbox, outbox and stream rows

@@ -168,7 +168,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(outcome).toEqual({ triggered: true });
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
-      expect.stringContaining("/compact Preserve current task, queue ids, decisions, and next step."),
+      expect.stringContaining("Preserve current task, queue ids, decisions, and next step."),
       expect.objectContaining({ beforeWrite: expect.any(Function) }),
     );
     expect(send.mock.calls[1]![1]).toContain("Treat that later normal user message as operator-authorized");
@@ -698,6 +698,10 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).not.toContain("Do not optimize for token conservation");
     expect(send.mock.calls[3]![1]).toContain("read your newest restore map and use the restore packet as a lookup");
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
+    expect(send.mock.calls[2]![1]).not.toContain("refocusing");
+    expect(send.mock.calls[3]![1]).toContain("/tmp/openrig-test-home/plugins/openrig-core/skills/refocusing/SKILL.md");
+    expect(send.mock.calls[3]![1]).toContain("run its topology and work traces");
+    expect(send.mock.calls[4]![1]).toContain("if the traces did not run during restore, run them now");
   });
 
   it("post-compact restore prompt carries the configured operator restore instruction", async () => {
@@ -1178,12 +1182,14 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(callOrder).toEqual(["prep", "idle", `compact:${JSON.stringify({ waitForIdleMs: 1000 })}`]);
     });
 
-    it("wait-for-idle failure means /compact never landed: the back-half is NOT seeded (ordering guarantee)", async () => {
+    it.each([0, 75])("wait-for-idle failure means /compact never landed: the back-half is NOT seeded (preparation delay=%ims)", async (delayMs) => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
-      send.mockImplementationOnce(async () => ({ ok: true })); // prep lands
+      send.mockImplementationOnce(async () => { await new Promise(resolve => setTimeout(resolve, delayMs)); return { ok: true }; }); // prep lands
       send.mockImplementationOnce(async () => ({ ok: false, reason: "wait_for_idle_timeout" })); // /compact never idle
-      const enforcer = new ClaudeCompactionEnforcer(settings, transport);
+      // This control exercises transport ordering, not elapsed preparation time.
+      // Native fixture file I/O and busy CI scheduling must not consume its 50ms budget.
+      const enforcer = new ClaudeCompactionEnforcer(settings, transport, { now: () => 1_700_000_000_000 });
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
       expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout",
