@@ -26,7 +26,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import readline from "node:readline";
 import {
-  DSH_DEFAULT_PROFILE, DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
+  DSH_DEFAULT_PROFILE, DSH_DEFAULT_SETUP_TIMEOUT_MS, DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
   buildDshChildArgs, buildDshChildEnv, dshPermissionModeForPosture, dshSeatPaths, normalizeDshPosture,
   parseDshRunnerState, redactDshSessionId, resolveDshConfigSelections,
   type DshConfigOption, type DshPermissionMode, type DshPosture, type DshRunnerExit, type DshRunnerState,
@@ -40,7 +40,7 @@ export const MAX_DSH_INPUT_BYTES = 1024 * 1024;
 /** Setup-scoped bound for initialize/new/resume/set_config_option. It must stay
  *  BELOW the adapter's readiness window (30 s), so a wedged setup makes the
  *  runner write `exited: setup-failed` and exit instead of outliving the launch. */
-export const DSH_SETUP_TIMEOUT_MS = 20_000;
+export const DSH_SETUP_TIMEOUT_MS = DSH_DEFAULT_SETUP_TIMEOUT_MS;
 /** Bound on the close handshake: a wedged dsh must not make `/quit` or a signal
  *  hang forever; after this the runner disposes the child unconditionally. */
 export const DSH_CLOSE_TIMEOUT_MS = 2_000;
@@ -823,7 +823,7 @@ export class DshRunnerCore {
     const [verb] = line.slice(1).split(/\s+/);
     switch (verb) {
       case "help":
-        this.io.mirrorLine("local: /help /session /usage /cancel /quit — anything else is sent to the agent");
+        this.io.mirrorLine("local: /help /session /usage /cancel /abort /quit — anything else is sent to the agent");
         return true;
       case "session":
         this.io.mirrorLine(`[dsh-runner] session ${this.sessionId ? "[redacted-session]" : "(none)"} · cwd ${this.identity.cwd}`);
@@ -834,6 +834,9 @@ export class DshRunnerCore {
           : `[dsh-runner] context ${this.lastUsagePercent}% used`);
         return true;
       case "cancel":
+      case "abort":
+        // N-B: the Pi-family input helper submits "/abort" on Ctrl-C; for dsh
+        // that must cancel the turn, never become a model prompt.
         if (this.sessionId) {
           this.transport?.cancel(this.sessionId);
           this.io.mirrorLine("[dsh-runner] cancel requested");
@@ -960,6 +963,10 @@ export class DshRunnerCore {
   // -- lifecycle -------------------------------------------------------------
 
   handleAgentExit(opts: { code: number | null; signal: string | null }): void {
+    // N-C: setup failure / shutdown already decided the exit record. A graceful
+    // child exit during dispose must not overwrite it (a setup-failed launch
+    // exiting 0 looked successful to the caller).
+    if (this.exitAnnounced) return;
     this.ready = false;
     if (!this.shuttingDown) {
       // A child that dies on its own is an agent failure, not a seat shutdown:

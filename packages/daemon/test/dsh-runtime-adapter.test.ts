@@ -229,6 +229,46 @@ describe("dsh adapter: readiness", () => {
     await expect(adapter.checkReady(BINDING)).resolves.toEqual({ ready: true });
   });
 
+  it("N-A: accepts a restore sidecar after a launch settled, even when READY has scrolled out", async () => {
+    const fs = memFs({}, [SOURCE_HOME, `${SOURCE_HOME}/profiles`, `${SOURCE_HOME}/profiles/acp`]);
+    const tmux = mockTmux({
+      sendShellCommand: async () => { fs.writeFile(PATH.runnerStatePath, readySidecar("launch-1")); return { ok: true as const }; },
+      // Long transcript, no READY/error marker: the sidecar is the only proof.
+      capturePaneContent: async () => `${"agent output without markers\n".repeat(80)}`,
+    });
+    const adapter = adapterWith(fs, tmux);
+    await expect(adapter.launchHarness(BINDING, { name: SESSION })).resolves.toMatchObject({ ok: true });
+    // A restore in the same daemon goes through DshResumeAdapter, which writes
+    // its own launch-scoped ready sidecar.
+    fs.writeFile(PATH.runnerStatePath, readySidecar("resume-r1"));
+    await expect(adapter.checkReady(BINDING)).resolves.toEqual({ ready: true });
+  });
+
+  it("N-E: forwards a configured setup timeout to the runner", async () => {
+    const fs = memFs({}, [SOURCE_HOME, `${SOURCE_HOME}/profiles`, `${SOURCE_HOME}/profiles/acp`]);
+    const sent: string[] = [];
+    const tmux = mockTmux({ sendShellCommand: async (_t, text) => { sent.push(text); return { ok: true as const }; } });
+    const adapter = adapterWith(fs, tmux, ["launch-1"], { setupTimeoutMs: 25_000 });
+    const launch = adapter.launchHarness(BINDING, { name: SESSION });
+    fs.writeFile(PATH.runnerStatePath, readySidecar("launch-1"));
+    await launch;
+    expect(sent.join("\n")).toContain("--setup-timeout 25000");
+  });
+
+  it("N-E: reads OPENRIG_DSH_SETUP_TIMEOUT_MS and rejects an out-of-window dependency", async () => {
+    const fs = memFs({}, [SOURCE_HOME]);
+    expect(() => adapterWith(fs, mockTmux(), ["launch-1"], { setupTimeoutMs: 30_000 })).toThrow(/setupTimeoutMs/);
+    expect(() => adapterWith(fs, mockTmux(), ["launch-1"], { setupTimeoutMs: 0 })).toThrow(/setupTimeoutMs/);
+    const sent: string[] = [];
+    const tmux = mockTmux({ sendShellCommand: async (_t, text) => { sent.push(text); return { ok: true as const }; } });
+    const fs2 = memFs({}, [SOURCE_HOME, `${SOURCE_HOME}/profiles`, `${SOURCE_HOME}/profiles/acp`]);
+    const adapter = adapterWith(fs2, tmux, ["launch-1"], { env: { OPENRIG_DSH_SETUP_TIMEOUT_MS: "24000" } });
+    const launch = adapter.launchHarness(BINDING, { name: SESSION });
+    fs2.writeFile(PATH.runnerStatePath, readySidecar("launch-1"));
+    await launch;
+    expect(sent.join("\n")).toContain("--setup-timeout 24000");
+  });
+
   it("refuses ready when the pane is back at a shell (the runner process is gone)", async () => {
     const fs = memFs({ [PATH.runnerStatePath]: readySidecar("launch-1") }, [SOURCE_HOME]);
     const adapter = adapterWith(fs, mockTmux({ getPaneCommand: async () => "zsh" }));
@@ -570,6 +610,16 @@ describe("dsh resume adapter: honesty and forwarding (F7/F8/F11/F15/F17)", () =>
     expect(cmd).toContain("--profile 'custom-profile'");
     expect(cmd).toContain("--dsh-command '/opt/deepseek/bin/dsh'");
     expect(cmd).toContain("--effort 'high'");
+    expect(cmd).not.toContain("--setup-timeout");
+  });
+
+  it("N-E: forwards the setup timeout on resume", async () => {
+    const fs = memFs({}, [SOURCE_HOME, `${SOURCE_HOME}/profiles`, `${SOURCE_HOME}/profiles/acp`]);
+    const sent: string[] = [];
+    const tmux = mockTmux({ sendShellCommand: async (_t, text) => { sent.push(text); fs.writeFile(PATH.runnerStatePath, JSON.stringify({ ready: true, launchId: "launch-r1", sessionId: SESSION_ID, updatedAt: "t" })); return { ok: true as const }; } });
+    const adapter = newResume(fs, tmux, { setupTimeoutMs: 27_000 });
+    await adapter.resume(SESSION, "dsh_session_id", SESSION_ID, "/repo");
+    expect(sent.join("\n")).toContain("--setup-timeout 27000");
   });
 
   it("classifies dsh's stable refusals as retry_fresh, and other exits as a hard failure", async () => {

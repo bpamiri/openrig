@@ -17,8 +17,8 @@ import type { AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { yoloEnabled } from "./yolo-mode.js";
 import {
-  DSH_RESUME_TYPE, buildDshRunnerCommand, buildPendingDshRunnerState, dshPermissionModeForPosture, dshSeatPaths,
-  normalizeDshPosture, parseDshRunnerState, provisionDshSeatHome, redactDshSessionId,
+  DSH_MAX_SETUP_TIMEOUT_MS, DSH_RESUME_TYPE, buildDshRunnerCommand, buildPendingDshRunnerState, dshPermissionModeForPosture, dshSeatPaths,
+  normalizeDshPosture, parseDshRunnerState, provisionDshSeatHome, redactDshSessionId, resolveDshSetupTimeoutMs,
   type DshHomeFsOps, type DshPosture, type DshRunnerState,
 } from "./dsh-runner-protocol.js";
 
@@ -42,8 +42,12 @@ export interface DshResumeAdapterDeps {
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
   newLaunchId?: () => string;
-  /** The environment the OPENRIG_YOLO decision reads (tests inject). */
+  /** The environment the OPENRIG_YOLO decision reads (tests inject), and the
+   *  fallback source for OPENRIG_DSH_SETUP_TIMEOUT_MS. */
   env?: NodeJS.ProcessEnv;
+  /** Setup request bound, below the 30 s readiness window. Defaults to the
+   *  runner's 20 s; falls back to OPENRIG_DSH_SETUP_TIMEOUT_MS. */
+  setupTimeoutMs?: number;
 }
 
 export type DshResumeResult =
@@ -69,6 +73,7 @@ export class DshResumeAdapter {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly newLaunchId: () => string;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly setupTimeoutMs: number | undefined;
 
   constructor(deps: DshResumeAdapterDeps) {
     this.tmux = deps.tmux;
@@ -93,6 +98,14 @@ export class DshResumeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
     this.env = deps.env ?? process.env;
+    if (deps.setupTimeoutMs !== undefined) {
+      this.setupTimeoutMs = resolveDshSetupTimeoutMs(deps.setupTimeoutMs);
+      if (this.setupTimeoutMs === undefined) {
+        throw new Error(`setupTimeoutMs must be an integer between 1 and ${DSH_MAX_SETUP_TIMEOUT_MS}`);
+      }
+    } else {
+      this.setupTimeoutMs = resolveDshSetupTimeoutMs(this.env["OPENRIG_DSH_SETUP_TIMEOUT_MS"]);
+    }
   }
 
   /** dsh's token is a session ID, so this is the `_session_id` shape — NOT the
@@ -162,6 +175,7 @@ export class DshResumeAdapter {
       launchId,
       dshCommand: this.dshCommand,
       profile: this.profile,
+      setupTimeoutMs: this.setupTimeoutMs,
     });
     const command = this.seatLaunchEnvironment
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, {

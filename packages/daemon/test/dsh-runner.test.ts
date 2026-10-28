@@ -377,10 +377,12 @@ class FakeAcpClient extends EventEmitter {
   readonly protocolVersion: number;
   readonly configOptions: unknown[] | undefined;
   readonly resumeConfigOptions: unknown[] | undefined;
+  readonly exitOnDispose: { code: number | null; signal: string | null } | null;
 
   constructor(opts: {
     failInitialize?: string; failConfig?: string; resumeError?: string;
     protocolVersion?: number; configOptions?: unknown[] | undefined; resumeConfigOptions?: unknown[] | undefined;
+    exitOnDispose?: { code: number | null; signal: string | null };
   } = {}) {
     super();
     this.failInitialize = opts.failInitialize ?? null;
@@ -389,6 +391,7 @@ class FakeAcpClient extends EventEmitter {
     this.protocolVersion = opts.protocolVersion ?? 1;
     this.configOptions = "configOptions" in opts ? opts.configOptions : CONFIG_OPTIONS;
     this.resumeConfigOptions = opts.resumeConfigOptions;
+    this.exitOnDispose = opts.exitOnDispose ?? null;
   }
   start(): void { this.note("start"); }
   async initialize(opts: { timeoutMs?: number } = {}): Promise<unknown> {
@@ -424,7 +427,12 @@ class FakeAcpClient extends EventEmitter {
   }
   cancel(): void {}
   async closeSession(): Promise<unknown> { this.closes += 1; return {}; }
-  async dispose(): Promise<void> { this.disposed = true; }
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    // A real child exits gracefully after dispose; N-C is about that exit
+    // arriving after setup already decided the launch failed.
+    if (this.exitOnDispose) this.emit("exit", this.exitOnDispose);
+  }
 }
 
 function runSetup(opts: {
@@ -527,6 +535,25 @@ describe("runDshRunner setup (F1/F3/F4/F11/F12/F13)", () => {
     expect(states.at(-1)?.exited?.error).toContain("deepseek-v4-flash");
     expect(c.client.configs).toEqual([]);
     expect(c.client.disposed).toBe(true);
+  });
+
+  it("N-C: keeps exit 1 when a setup-failed launch's child exits 0 during dispose", async () => {
+    const c = runSetup({
+      extraArgs: ["--session", SESSION_ID],
+      client: new FakeAcpClient({ resumeError: "session is not resumable", exitOnDispose: { code: 0, signal: null } }),
+    });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    expect(sidecarStates(c.writes).at(-1)?.exited).toMatchObject({ reason: "setup-failed" });
+  });
+
+  it("N-C: keeps exit 1 for an unmapped model whose child exits 0 during dispose", async () => {
+    const c = runSetup({
+      extraArgs: ["--model", "deepseek/deepseek-unknown"],
+      client: new FakeAcpClient({ exitOnDispose: { code: 0, signal: null } }),
+    });
+    const result = await c.run;
+    expect(result.code).toBe(1);
   });
 
   it("turns a rejected config option into setup-failed with no READY ever printed", async () => {
@@ -666,5 +693,24 @@ describe("pane input seam (F2)", () => {
       editor.close();
     }
     expect(input.isRaw).toBe(false);
+  });
+
+  it("N-B: Ctrl-C cancels through the dsh-local /abort, never as a model prompt", () => {
+    const f = makeCore();
+    const input = Object.assign(new PassThrough(), {
+      isTTY: true, isRaw: false,
+      setRawMode: vi.fn(function (this: { isRaw: boolean }, value: boolean) { this.isRaw = value; }),
+    });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+    const editor = createRunnerInput(input as unknown as NodeJS.ReadStream, output as unknown as NodeJS.WriteStream,
+      (block) => f.core.handleInput(block));
+    try {
+      input.write("\u0003");
+    } finally {
+      editor.close();
+    }
+    expect(f.cancels).toEqual([SESSION_ID]);
+    expect(f.prompts).toEqual([]);
+    expect(f.lines.join("\n")).toContain("cancel requested");
   });
 });

@@ -7,7 +7,8 @@ import { describe, it, expect } from "vitest";
 import {
   DSH_DEFAULT_PROFILE, DSH_PROVIDER_ENV_VARS, DSH_RESUME_TYPE, DSH_RUNNER_ERROR_MARKER,
   DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
-  buildDshChildArgs, buildDshChildEnv, buildDshRunnerCommand, buildPendingDshRunnerState,
+  DSH_DEFAULT_SETUP_TIMEOUT_MS, buildDshChildArgs, buildDshChildEnv, buildDshRunnerCommand, buildPendingDshRunnerState,
+  resolveDshSetupTimeoutMs,
   dshPermissionModeForPosture, dshProviderFromModel, dshSeatPaths, normalizeDshPosture,
   parseDshRunnerState, provisionDshSeatHome, redactDshSessionId, resolveDshConfigSelections,
   sanitizeDshSessionName,
@@ -117,6 +118,19 @@ describe("writable seat DSH_HOME", () => {
       expect.objectContaining({ kind: "removed-credential-link", entry: ".credentials.yaml" }),
     ]));
     expect(links.has("/seat/dsh-home/.credentials.yaml")).toBe(false);
+  });
+
+  it("N-D: removes a dangling credential symlink without following it", () => {
+    const removed: string[] = [];
+    const fs: DshHomeFsOps = {
+      exists: () => false, // a dangling link: the target is gone, so exists() is false
+      mkdirp: () => {}, copyFile: () => {}, copyDir: () => {}, symlink: () => {},
+      isSymlink: (p) => p === "/seat/dsh-home/.credentials.yaml",
+      unlink: (p) => { removed.push(p); },
+    };
+    const actions = provisionDshSeatHome(fs, { sourceHome: "/op/.dsh", seatHome: "/seat/dsh-home" });
+    expect(actions).toContainEqual(expect.objectContaining({ kind: "removed-credential-link", entry: ".credentials.yaml" }));
+    expect(removed).toEqual(["/seat/dsh-home/.credentials.yaml"]);
   });
 
   it("adopts an existing seat home instead of re-copying over what dsh wrote", () => {
@@ -248,6 +262,21 @@ describe("runner contract", () => {
     expect(buildDshRunnerCommand({ ...base, dshCommand: "dsh" })).not.toContain("--dsh-command");
     expect(buildDshRunnerCommand({ ...base, dshCommand: "/opt/deepseek/bin/dsh" }))
       .toContain("--dsh-command '/opt/deepseek/bin/dsh'");
+  });
+
+  it("N-E: forwards a non-default setup timeout and hides the default", () => {
+    const base = {
+      runnerEntryPath: "/r.js", sessionName: "s", stateRoot: "/st", dshHome: "/h", cwd: "/c",
+      posture: "floor" as const, launchId: "L",
+    };
+    expect(buildDshRunnerCommand(base)).not.toContain("--setup-timeout");
+    expect(buildDshRunnerCommand({ ...base, setupTimeoutMs: DSH_DEFAULT_SETUP_TIMEOUT_MS })).not.toContain("--setup-timeout");
+    expect(buildDshRunnerCommand({ ...base, setupTimeoutMs: 25_000 })).toContain("--setup-timeout 25000");
+    expect(resolveDshSetupTimeoutMs(25_000)).toBe(25_000);
+    expect(resolveDshSetupTimeoutMs("24000")).toBe(24_000);
+    expect(resolveDshSetupTimeoutMs(0)).toBeUndefined();
+    expect(resolveDshSetupTimeoutMs(DSH_DEFAULT_SETUP_TIMEOUT_MS + 9_001)).toBeUndefined();
+    expect(resolveDshSetupTimeoutMs("nope")).toBeUndefined();
   });
 
   it("names the markers and resume type the adapter greps for", () => {

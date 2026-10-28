@@ -93,6 +93,22 @@ export const DSH_SEAT_HOME_COPY_ENTRIES = ["profiles"] as const;
 export const DSH_SEAT_HOME_LINK_ENTRIES = [".agent-presets", "settings.yaml.imported"] as const;
 /** The operator credential store a seat must never inherit as a link. */
 export const DSH_CREDENTIALS_FILE = ".credentials.yaml";
+/** Setup-scoped request bound. Must stay below the adapter's 30 s readiness
+ *  window: a wedged setup then ends with `setup-failed` before the launch gives
+ *  up, and a slow-catalog operator can raise it (up to DSH_MAX_SETUP_TIMEOUT_MS)
+ *  without widening the readiness window. */
+export const DSH_DEFAULT_SETUP_TIMEOUT_MS = 20_000;
+export const DSH_MAX_SETUP_TIMEOUT_MS = 29_000;
+
+/** Resolve an explicit dependency or an environment value to a usable bound.
+ *  Invalid values are ignored here; the adapters reject an invalid explicit
+ *  dependency so a typo cannot silently fall back to the default. */
+export function resolveDshSetupTimeoutMs(value: number | string | undefined): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > DSH_MAX_SETUP_TIMEOUT_MS) return undefined;
+  return Math.floor(parsed);
+}
 /** The one profile a managed seat runs. `dsh --profile acp`. */
 export const DSH_DEFAULT_PROFILE = "acp";
 
@@ -197,7 +213,10 @@ export function provisionDshSeatHome(
   // whole credential store into the seat. Never leave that in place, and never
   // replace it with anything derived from the store.
   const seatCredentials = nodePath.join(opts.seatHome, DSH_CREDENTIALS_FILE);
-  if (fs.exists(seatCredentials) && fs.isSymlink?.(seatCredentials) && fs.unlink) {
+  // N-D: lstat only. `exists` follows the link, so a dangling credential link
+  // (target deleted, link still pointing at the operator's store) would survive
+  // and resolve again if the target came back.
+  if (fs.isSymlink?.(seatCredentials) && fs.unlink) {
     fs.unlink(seatCredentials);
     actions.push({ kind: "removed-credential-link", entry: DSH_CREDENTIALS_FILE, to: seatCredentials });
   }
@@ -583,6 +602,9 @@ export interface DshRunnerLaunchOpts {
   profile?: string;
   /** Optional JSON file holding the ACP `mcpServers` array. */
   mcpServersFile?: string;
+  /** Setup request bound (N-E). Non-default values are forwarded;
+   *  the runner's default is DSH_DEFAULT_SETUP_TIMEOUT_MS. */
+  setupTimeoutMs?: number;
 }
 
 /** The command typed into the seat's tmux pane. The runner owns everything past
@@ -604,6 +626,9 @@ export function buildDshRunnerCommand(opts: DshRunnerLaunchOpts): string {
   if (dshCommand && dshCommand !== "dsh") parts.push("--dsh-command", shellQuote(dshCommand));
   const profile = opts.profile?.trim();
   if (profile && profile !== DSH_DEFAULT_PROFILE) parts.push("--profile", shellQuote(profile));
+  if (opts.setupTimeoutMs !== undefined && opts.setupTimeoutMs !== DSH_DEFAULT_SETUP_TIMEOUT_MS) {
+    parts.push("--setup-timeout", String(opts.setupTimeoutMs));
+  }
   if (opts.model?.trim()) parts.push("--model", shellQuote(opts.model.trim()));
   if (opts.effort?.trim()) parts.push("--effort", shellQuote(opts.effort.trim()));
   if (opts.nodeId?.trim()) parts.push("--node-id", shellQuote(opts.nodeId.trim()));

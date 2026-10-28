@@ -38,9 +38,9 @@ import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { yoloEnabled } from "./yolo-mode.js";
 import { DSH_RESUME_TYPE } from "./dsh-runner-protocol.js";
 import {
-  DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
+  DSH_MAX_SETUP_TIMEOUT_MS, DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
   buildDshRunnerCommand, buildPendingDshRunnerState, dshPermissionModeForPosture, dshSeatPaths, normalizeDshPosture,
-  parseDshRunnerState, provisionDshSeatHome,
+  parseDshRunnerState, provisionDshSeatHome, resolveDshSetupTimeoutMs,
   type DshHomeFsOps, type DshPosture, type DshRunnerState,
 } from "./dsh-runner-protocol.js";
 
@@ -78,8 +78,12 @@ export interface DshRuntimeAdapterDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
-  /** The environment the OPENRIG_YOLO decision reads (tests inject). */
+  /** The environment the OPENRIG_YOLO decision reads (tests inject), and the
+   *  fallback source for OPENRIG_DSH_SETUP_TIMEOUT_MS. */
   env?: NodeJS.ProcessEnv;
+  /** Setup request bound, below the 30 s readiness window. Defaults to the
+   *  runner's 20 s; falls back to OPENRIG_DSH_SETUP_TIMEOUT_MS. */
+  setupTimeoutMs?: number;
 }
 
 export class DshRuntimeAdapter implements RuntimeAdapter {
@@ -96,6 +100,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly newLaunchId: () => string;
   private readonly env: NodeJS.ProcessEnv;
+  private readonly setupTimeoutMs: number | undefined;
   /** The attempt this instance actually launched; a ready sidecar stamped for a
    *  different attempt cannot false-green checkReady. Null before any launch
    *  (adopt/restore readiness accepts the stored sidecar). */
@@ -119,6 +124,14 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
     this.env = deps.env ?? process.env;
+    if (deps.setupTimeoutMs !== undefined) {
+      this.setupTimeoutMs = resolveDshSetupTimeoutMs(deps.setupTimeoutMs);
+      if (this.setupTimeoutMs === undefined) {
+        throw new Error(`setupTimeoutMs must be an integer between 1 and ${DSH_MAX_SETUP_TIMEOUT_MS}`);
+      }
+    } else {
+      this.setupTimeoutMs = resolveDshSetupTimeoutMs(this.env["OPENRIG_DSH_SETUP_TIMEOUT_MS"]);
+    }
   }
 
   /** The seat's DSH_HOME: an explicit shared home, or a per-seat writable copy. */
@@ -284,6 +297,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     // stamped with THIS attempt's launchId can make the seat look ready.
     const launchId = this.newLaunchId();
     this.currentLaunchId = launchId;
+    try {
     const pending = buildPendingDshRunnerState(launchId, new Date().toISOString(), {
       sessionName, cwd: binding.cwd, posture, permissionMode: dshPermissionModeForPosture(posture),
     });
@@ -307,6 +321,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
       launchId,
       dshCommand: this.dshCommand,
       profile: this.profile,
+      setupTimeoutMs: this.setupTimeoutMs,
     });
 
     const command = this.seatLaunchEnvironment
@@ -350,6 +365,12 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     }
 
     return { ok: true, resumeToken: reported.token, resumeType: DSH_RESUME_TYPE, appliedLaunch: observeDshPermissionMode(pending.permissionMode) };
+    } finally {
+      // N-A: the launch is settled. checkReady must accept a later restore's
+      // sidecar (DshResumeAdapter writes its own launch id); only an in-flight
+      // launch is scoped here.
+      this.currentLaunchId = null;
+    }
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
