@@ -296,7 +296,7 @@ activityRoutes.post("/hooks", async (c) => {
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
-    // A dsh runner announces the ACP session id (`session-<uuid>`) it established. The token is id-shaped, so it takes
+    // A dsh runner announces the ACP session id (a bare UUID) it established. The token is id-shaped, so it takes
     // the same strict path as OMP: the exact seat name, the seat's own runtime, the current occupant generation, and a
     // session id that agrees with the runner's own sidecar. A refused post says tokenPersisted: false.
     if (runtime === "dsh" || resolved.runtime === "dsh") {

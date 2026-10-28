@@ -2538,7 +2538,7 @@ export class PodRigInstantiator {
           : input.member.runtime === "claude-code" && category === "skill" && claudeSkillTargetRoot
             ? nodePath.join(claudeSkillTargetRoot, effectiveId, "SKILL.md")
           : category === "skill" && adapter.skillTargetPath
-            ? adapter.skillTargetPath(launchResult.binding.tmuxSession, effectiveId)
+            ? adapter.skillTargetPath(launchResult.binding.tmuxSession, effectiveId, cwd)
             : claudeConflictTargetPath(
               category, effectiveId, cwd, sourcePath,
               input.member.runtime === "claude-code" ? this.deps.rigRepo.getRigClaudeManagedBlockFile(input.rigId) ?? undefined : undefined,

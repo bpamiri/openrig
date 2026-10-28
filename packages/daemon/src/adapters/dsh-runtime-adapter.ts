@@ -14,10 +14,12 @@
 //      `$DSH_HOME/profiles/<name>/cordis.yml` on every boot. Pointing a seat at
 //      the operator's own `~/.dsh` would rewrite the profile tree their own dsh
 //      sessions are using, so every seat gets its own home, assembled from the
-//      operator's by copying the profile and symlinking the shared/secret parts.
-//   2. A dsh session id cannot be chosen and is not a file: it is
-//      `session-<uuid>`, reported by `session/new` / `session/resume`. The
-//      resume token is therefore id-shaped, not path-shaped.
+//      operator's by copying the profile and symlinking only non-secret shared
+//      parts; the credential store is never linked into a seat.
+//   2. A dsh session id cannot be chosen and is not a file: it is a bare UUID
+//      (verified live on 0.2.1-rc.2 and in 0.2.0-rc.2's source), reported by
+//      `session/new` / `session/resume`. The resume token is therefore
+//      id-shaped, not path-shaped.
 
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
@@ -32,11 +34,13 @@ import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { observeDshPermissionMode } from "../domain/permission-drift.js";
+import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { yoloEnabled } from "./yolo-mode.js";
 import { DSH_RESUME_TYPE } from "./dsh-runner-protocol.js";
 import {
   DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
-  buildDshRunnerCommand, dshPermissionModeForPosture, dshSeatPaths, normalizeDshPosture,
-  parseDshRunnerState, provisionDshSeatHome, sanitizeDshSessionName,
+  buildDshRunnerCommand, buildPendingDshRunnerState, dshPermissionModeForPosture, dshSeatPaths, normalizeDshPosture,
+  parseDshRunnerState, provisionDshSeatHome,
   type DshHomeFsOps, type DshPosture, type DshRunnerState,
 } from "./dsh-runner-protocol.js";
 
@@ -74,6 +78,8 @@ export interface DshRuntimeAdapterDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Launch-attempt id minting (tests inject; defaults to randomUUID). */
   newLaunchId?: () => string;
+  /** The environment the OPENRIG_YOLO decision reads (tests inject). */
+  env?: NodeJS.ProcessEnv;
 }
 
 export class DshRuntimeAdapter implements RuntimeAdapter {
@@ -89,6 +95,11 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
   private readonly profile: string;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly newLaunchId: () => string;
+  private readonly env: NodeJS.ProcessEnv;
+  /** The attempt this instance actually launched; a ready sidecar stamped for a
+   *  different attempt cannot false-green checkReady. Null before any launch
+   *  (adopt/restore readiness accepts the stored sidecar). */
+  private currentLaunchId: string | null = null;
 
   constructor(deps: DshRuntimeAdapterDeps) {
     this.tmux = deps.tmux;
@@ -107,6 +118,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     this.profile = deps.profile?.trim() || "acp";
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
+    this.env = deps.env ?? process.env;
   }
 
   /** The seat's DSH_HOME: an explicit shared home, or a per-seat writable copy. */
@@ -144,9 +156,12 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
   }
 
   /** Conflict detection must inspect the seat's own project tree (dsh skills are
-   *  project-scoped and hot-watched), not a Claude sibling's directory. */
-  skillTargetPath(_tmuxSession: string | null, effectiveId: string): string | null {
-    return null;
+   *  project-scoped and hot-watched), not a Claude sibling's directory. The
+   *  binding's cwd is the target root; returning null blinds set-cwd's
+   *  destination check and the projection conflict detector. */
+  skillTargetPath(_tmuxSession: string | null, effectiveId: string, cwd?: string | null): string | null {
+    if (!cwd) return null;
+    return nodePath.join(cwd, ".dsh", "skills", effectiveId, "SKILL.md");
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
@@ -180,8 +195,13 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
 
     for (const file of files) {
       try {
-        const content = this.fs.readFile(file.absolutePath);
-        const hint = file.deliveryHint === "auto" ? resolveConcreteHint(file.path, content) : file.deliveryHint;
+        // A skill_install source is a directory; reading it as text is what made
+        // this path untestable (and unusable) before. Only hints that need bytes
+        // read them.
+        const hint = file.deliveryHint === "auto"
+          ? resolveConcreteHint(file.path, this.fs.readFile(file.absolutePath))
+          : file.deliveryHint;
+        const content = hint === "skill_install" ? "" : this.fs.readFile(file.absolutePath);
         switch (hint) {
           case "guidance_merge": {
             // dsh reads the project chain (AGENTS.md / CLAUDE.md / *.local.md),
@@ -241,6 +261,12 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
       };
     }
 
+    // F14: validate a resume token BEFORE anything is typed, like Pi.
+    if (opts.resumeToken) {
+      const validation = validateResumeToken("dsh", opts.resumeToken);
+      if (!validation.ok) return { ok: false, error: `dsh resume token is not usable: ${validation.error}` };
+    }
+
     const sessionName = binding.tmuxSession;
     const paths = dshSeatPaths(this.stateRoot, sessionName);
     const dshHome = this.seatDshHome(sessionName);
@@ -257,17 +283,10 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     // instance with a pending record BEFORE the command is typed, so only states
     // stamped with THIS attempt's launchId can make the seat look ready.
     const launchId = this.newLaunchId();
-    const pending: DshRunnerState = {
-      ready: false,
-      launchId,
-      sessionName,
-      cwd: binding.cwd,
-      posture,
-      permissionMode: dshPermissionModeForPosture(posture),
-      sessionId: null,
-      updatedAt: new Date().toISOString(),
-      exited: null,
-    };
+    this.currentLaunchId = launchId;
+    const pending = buildPendingDshRunnerState(launchId, new Date().toISOString(), {
+      sessionName, cwd: binding.cwd, posture, permissionMode: dshPermissionModeForPosture(posture),
+    });
     this.fs.writeFile(paths.runnerStatePath, `${JSON.stringify(pending, null, 2)}\n`);
 
     const cmd = buildDshRunnerCommand({
@@ -279,6 +298,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
       posture,
       sessionId: opts.resumeToken,
       model: binding.model,
+      effort: binding.effort,
       nodeId: binding.nodeId,
       // The occupant generation the activity hooks must carry: without it the
       // daemon treats every hook as unverifiable and falls back to sampling
@@ -286,6 +306,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
       generation: binding.launchGeneration,
       launchId,
       dshCommand: this.dshCommand,
+      profile: this.profile,
     });
 
     const command = this.seatLaunchEnvironment
@@ -312,18 +333,23 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
     if (!sessionId) {
       return { ok: false, error: "dsh launch: the runner became ready but reported no session id" };
     }
+    // F14: validate the runner-reported id before it is persisted as a token.
+    const reported = validateResumeToken("dsh", sessionId);
+    if (!reported.ok) {
+      return { ok: false, error: `dsh launch: the runner reported an unusable session id: ${reported.error}` };
+    }
     if (opts.resumeToken && sessionId !== opts.resumeToken) {
       // An exact resume must continue the requested conversation. dsh refuses a
       // mismatched cwd or a live session, and a runner that came up on any other
-      // id started a different conversation — say so instead of persisting it.
+      // id started a different conversation — say so without quoting either id.
       return {
         ok: false,
-        error: `dsh resume: the runner is ready but reports session ${sanitizeDshSessionName(sessionId)}, not the requested one`,
+        error: "dsh resume: the runner is ready but reports a different session than the one requested",
         recovery: "retry_fresh",
       };
     }
 
-    return { ok: true, resumeToken: sessionId, resumeType: DSH_RESUME_TYPE, appliedLaunch: observeDshPermissionMode(pending.permissionMode) };
+    return { ok: true, resumeToken: reported.token, resumeType: DSH_RESUME_TYPE, appliedLaunch: observeDshPermissionMode(pending.permissionMode) };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
@@ -345,7 +371,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
         code: "runner_exited",
       };
     }
-    if (state?.ready) {
+    if (state?.ready && (!this.currentLaunchId || state.launchId === this.currentLaunchId)) {
       if (atShell) {
         return { ready: false, reason: "dsh-runner sidecar says ready but the pane is back at a shell (runner process gone)", code: "runner_exited" };
       }
@@ -371,11 +397,11 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
   // ── internals ──────────────────────────────────────────────────────────────
 
   /** The seat's launch posture. dsh bundles sandbox + approval, so it needs a
-   *  permission mode at launch, and there is no safe default to guess: an
-   *  attached policy is authoritative, otherwise the seat is on the floor. */
+   *  permission mode at launch. An attached policy is authoritative; with no
+   *  policy the family's OPENRIG_YOLO decision applies (never silently ignored). */
   private resolvePosture(binding: NodeBinding): DshPosture {
     if (binding.launchPosture) return normalizeDshPosture(binding.launchPosture);
-    return "floor";
+    return yoloEnabled(this.env) ? "full_bypass" : "floor";
   }
 
   /** Assemble (or adopt) the seat's writable DSH_HOME. Idempotent, and a no-op
@@ -428,6 +454,7 @@ export class DshRuntimeAdapter implements RuntimeAdapter {
         ok: false,
         error: "dsh launch: timed out waiting for the runner to report ready",
         recovery: "attention_required",
+        evidence: ((await this.tmux.capturePaneContent(sessionName, 40)) ?? "").split("\n").slice(-12).join("\n"),
       },
     };
   }

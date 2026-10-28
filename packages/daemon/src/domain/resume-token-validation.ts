@@ -1,7 +1,7 @@
 // OPR.0.4.0.22 FR-2 — per-runtime resume-token validation.
 // File-shaped Pi and OMP tokens share the same format floor; id-shaped
 // Claude/Codex tokens retain their original rules unchanged. dsh is id-shaped
-// too: its ACP session id is `session-<uuid>`, never a path — dsh reports the
+// too: its ACP session id is a bare UUID, never a path — dsh reports the
 // id and never discloses a session file, so a path-shaped token would be a
 // shape nothing can produce.
 //

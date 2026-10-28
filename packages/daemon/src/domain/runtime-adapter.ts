@@ -221,7 +221,7 @@ export interface RuntimeAdapter {
   /** The file an adapter's project() writes for a skill when it lives outside
    *  the Claude project tree, for "already in place" detection. Absent = the
    *  instantiator's default target. */
-  skillTargetPath?(tmuxSession: string | null, effectiveId: string): string | null;
+  skillTargetPath?(tmuxSession: string | null, effectiveId: string, cwd?: string | null): string | null;
 
   /** List currently installed/projected resources for a node. */
   listInstalled(binding: NodeBinding): Promise<InstalledResource[]>;

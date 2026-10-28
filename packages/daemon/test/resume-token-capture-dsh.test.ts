@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { deriveResumeToken } from "../src/domain/resume-token-capture.js";
 
 const sessionName = "qa-worker@dsh-rig";
-const sessionId = "session-4f7c2d1e-8a5b-4c3d-9e2f-6a1b0c9d8e7f";
+const sessionId = "4f7c2d1e-8a5b-4c3d-9e2f-6a1b0c9d8e7f";
 
 describe("dsh adoption resume token capture", () => {
   it("reads the dsh runner sidecar's ACP session id and never a Pi/OMP session file", async () => {

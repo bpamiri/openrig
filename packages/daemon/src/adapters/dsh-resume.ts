@@ -8,14 +8,17 @@
 // reporting the requested session id. Anything else is an honest failure, never
 // a silent fresh start (the adapter contract's stop-and-ask rule).
 
+import nodePath from "node:path";
+import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { observeDshPermissionMode } from "../domain/permission-drift.js";
 import type { AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
+import { yoloEnabled } from "./yolo-mode.js";
 import {
-  DSH_RESUME_TYPE, buildDshRunnerCommand, dshPermissionModeForPosture, dshSeatPaths, normalizeDshPosture,
-  parseDshRunnerState, provisionDshSeatHome,
+  DSH_RESUME_TYPE, buildDshRunnerCommand, buildPendingDshRunnerState, dshPermissionModeForPosture, dshSeatPaths,
+  normalizeDshPosture, parseDshRunnerState, provisionDshSeatHome, redactDshSessionId,
   type DshHomeFsOps, type DshPosture, type DshRunnerState,
 } from "./dsh-runner-protocol.js";
 
@@ -39,6 +42,8 @@ export interface DshResumeAdapterDeps {
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
   newLaunchId?: () => string;
+  /** The environment the OPENRIG_YOLO decision reads (tests inject). */
+  env?: NodeJS.ProcessEnv;
 }
 
 export type DshResumeResult =
@@ -63,6 +68,7 @@ export class DshResumeAdapter {
   private readonly maxWaitMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly newLaunchId: () => string;
+  private readonly env: NodeJS.ProcessEnv;
 
   constructor(deps: DshResumeAdapterDeps) {
     this.tmux = deps.tmux;
@@ -73,16 +79,20 @@ export class DshResumeAdapter {
     this.sharedDshHome = deps.sharedDshHome?.trim()
       || process.env["OPENRIG_DSH_SHARED_HOME"]?.trim()
       || undefined;
+    // F17: the same default as the launch path, so a restore of a seat with a
+    // missing seat home provisions from the operator's home instead of booting
+    // dsh against an empty DSH_HOME.
     this.sourceDshHome = deps.sourceDshHome?.trim()
       || process.env["OPENRIG_DSH_SOURCE_HOME"]?.trim()
       || process.env["DSH_HOME"]?.trim()
-      || "";
+      || nodePath.join(process.env["HOME"] ?? "", ".dsh");
     this.dshCommand = deps.dshCommand?.trim() || "dsh";
     this.profile = deps.profile?.trim() || "acp";
     this.pollMs = deps.pollMs ?? 250;
     this.maxWaitMs = deps.maxWaitMs ?? 30_000;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.newLaunchId = deps.newLaunchId ?? (() => crypto.randomUUID());
+    this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
+    this.env = deps.env ?? process.env;
   }
 
   /** dsh's token is a session ID, so this is the `_session_id` shape — NOT the
@@ -103,7 +113,7 @@ export class DshResumeAdapter {
     cwd: string,
     model?: string | null,
     resolvedPosture?: "floor" | "full_bypass" | "auto",
-    identity: { nodeId?: string; launchGeneration?: string } = {},
+    identity: { nodeId?: string; launchGeneration?: string; effort?: string | null } = {},
   ): Promise<DshResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "dsh resume not available" };
@@ -118,7 +128,9 @@ export class DshResumeAdapter {
 
     const paths = dshSeatPaths(this.stateRoot, sessionName);
     const dshHome = this.sharedDshHome ?? paths.dshHome;
-    const posture: DshPosture = resolvedPosture ? normalizeDshPosture(resolvedPosture) : "floor";
+    // F7: an explicit posture wins; with none, the family's OPENRIG_YOLO
+    // decision applies, so fresh launch and restore cannot disagree.
+    const posture: DshPosture = resolvedPosture ? normalizeDshPosture(resolvedPosture) : (yoloEnabled(this.env) ? "full_bypass" : "floor");
 
     try {
       this.fs.mkdirp(paths.seatRoot);
@@ -130,17 +142,9 @@ export class DshResumeAdapter {
     }
 
     const launchId = this.newLaunchId();
-    const pending: DshRunnerState = {
-      ready: false,
-      launchId,
-      sessionName,
-      cwd,
-      posture,
-      permissionMode: dshPermissionModeForPosture(posture),
-      sessionId: null,
-      updatedAt: new Date().toISOString(),
-      exited: null,
-    };
+    const pending = buildPendingDshRunnerState(launchId, new Date().toISOString(), {
+      sessionName, cwd, posture, permissionMode: dshPermissionModeForPosture(posture),
+    });
     this.fs.writeFile(paths.runnerStatePath, `${JSON.stringify(pending, null, 2)}\n`);
 
     const cmd = buildDshRunnerCommand({
@@ -152,10 +156,12 @@ export class DshResumeAdapter {
       posture,
       sessionId: requestedSessionId,
       model: model ?? undefined,
+      effort: identity.effort ?? undefined,
       nodeId: identity.nodeId,
       generation: identity.launchGeneration,
       launchId,
       dshCommand: this.dshCommand,
+      profile: this.profile,
     });
     const command = this.seatLaunchEnvironment
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, {
@@ -183,10 +189,14 @@ export class DshResumeAdapter {
       const state = this.readRunnerState(sessionName);
       if (state?.launchId === launchId) {
         if (state.exited) {
+          const detail = redactDshSessionId(`${state.exited.reason}${state.exited.error ? `: ${state.exited.error}` : ""}`, requestedSessionId);
+          // F15: dsh's stable refusals mean "this conversation cannot continue",
+          // which is the stop-and-ask outcome, not a hard failure.
+          const refused = /session is not resumable|session is already active|cwd does not match|unknown session/i.test(detail);
           return {
             ok: false,
-            code: "resume_failed",
-            message: `dsh resume failed: the runner exited (${state.exited.reason}${state.exited.error ? `: ${state.exited.error}` : ""})`,
+            code: refused ? "retry_fresh" : "resume_failed",
+            message: `dsh resume failed: the runner exited (${detail})`,
           };
         }
         if (state.ready) {

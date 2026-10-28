@@ -69,7 +69,7 @@ export function planCwdPreparation(
 
 function skillDirectory(runtime: string, binding: NodeBinding, adapter: RuntimeAdapter, id: string): string | null {
   if (adapter.skillTargetPath) {
-    const representative = adapter.skillTargetPath(binding.tmuxSession, id);
+    const representative = adapter.skillTargetPath(binding.tmuxSession, id, binding.cwd);
     return representative ? path.dirname(representative) : null;
   }
   if (runtime === "claude-code") return path.join(binding.cwd, ".claude", "skills", id);

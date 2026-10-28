@@ -14,7 +14,7 @@ import { activityRoutes } from "../src/routes/activity.js";
 
 const TOKEN = "dsh-hook-token";
 const SESSION = "dev-impl@dsh-rig";
-const SESSION_ID = "session-4f7c2d1e-8a5b-4c3d-9e2f-6a1b0c9d8e7f";
+const SESSION_ID = "4f7c2d1e-8a5b-4c3d-9e2f-6a1b0c9d8e7f";
 
 const openDbs: Array<() => void> = [];
 afterEach(() => { for (const close of openDbs.splice(0)) close(); });

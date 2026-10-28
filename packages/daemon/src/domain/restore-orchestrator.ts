@@ -2336,6 +2336,7 @@ export class RestoreOrchestrator {
       const result = await this.dshResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, {
         nodeId,
         launchGeneration,
+        effort,
       });
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
