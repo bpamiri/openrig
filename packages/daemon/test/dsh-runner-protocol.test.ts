@@ -9,7 +9,8 @@ import {
   DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
   buildDshChildArgs, buildDshChildEnv, buildDshRunnerCommand, buildPendingDshRunnerState,
   dshPermissionModeForPosture, dshProviderFromModel, dshSeatPaths, normalizeDshPosture,
-  parseDshRunnerState, provisionDshSeatHome, sanitizeDshSessionName,
+  parseDshRunnerState, provisionDshSeatHome, redactDshSessionId, resolveDshConfigSelections,
+  sanitizeDshSessionName,
   type DshHomeAction, type DshHomeFsOps,
 } from "../src/adapters/dsh-runner-protocol.js";
 
@@ -27,7 +28,11 @@ describe("posture → DSH_PERMISSION_MODE", () => {
     expect(normalizeDshPosture("FLOOR")).toBe("floor");
     expect(normalizeDshPosture("full-bypass")).toBe("full_bypass");
     expect(normalizeDshPosture("yolo")).toBe("full_bypass");
-    expect(normalizeDshPosture("read-only")).toBe("floor");
+  });
+
+  it("refuses read-only aliases instead of silently widening them to workspace-write", () => {
+    expect(() => normalizeDshPosture("read-only")).toThrow(/unknown posture/);
+    expect(() => normalizeDshPosture("readonly")).toThrow(/unknown posture/);
   });
 
   it("throws rather than guessing a permission mode", () => {
@@ -59,25 +64,29 @@ describe("writable seat DSH_HOME", () => {
   function recorder(existing: string[] = []) {
     const actions: DshHomeAction[] = [];
     const written: string[] = [];
+    const links = new Set<string>();
     const fs: DshHomeFsOps = {
-      exists: (p) => existing.includes(p),
+      exists: (p) => existing.includes(p) || links.has(p),
       mkdirp: (p) => { written.push(`mkdir ${p}`); },
       readDir: () => ["cordis.yml", "cordis.patch.yml", "package.json", "node_modules"],
       copyFile: (source, target) => { written.push(`copy ${source} -> ${target}`); },
       copyDir: (source, target) => { written.push(`copydir ${source} -> ${target}`); },
-      symlink: (target, linkPath) => { written.push(`link ${linkPath} -> ${target}`); },
+      symlink: (target, linkPath) => { written.push(`link ${linkPath} -> ${target}`); links.add(linkPath); },
+      isSymlink: (p) => links.has(p),
+      unlink: (p) => { written.push(`unlink ${p}`); links.delete(p); },
       statKind: (p) => (p.endsWith("node_modules") ? "directory" as const : "file" as const),
     };
-    return { fs, actions, written };
+    return { fs, actions, written, links };
   }
 
-  it("copies the profile (writable) and symlinks the shared and secret parts", () => {
-    const { fs, written } = recorder([
+  it("copies the profile (writable) and links only NON-secret shared parts", () => {
+    const { fs, written, links } = recorder([
       "/op/.dsh/profiles/acp",
       "/op/.dsh/profiles/acp/cordis.yml",
       "/op/.dsh/profiles/acp/node_modules",
       "/op/.dsh/profiles/node_modules",
       "/op/.dsh/.credentials.yaml",
+      "/op/.dsh/.agent-presets",
     ]);
     const actions = provisionDshSeatHome(fs, { sourceHome: "/op/.dsh", seatHome: "/seat/dsh-home" });
 
@@ -85,15 +94,29 @@ describe("writable seat DSH_HOME", () => {
     // copies (not links into the operator's home)…
     expect(written).toContain("copy /op/.dsh/profiles/acp/cordis.yml -> /seat/dsh-home/profiles/acp/cordis.yml");
     expect(written.some((w) => w.startsWith("copydir /op/.dsh/profiles/acp"))).toBe(false);
-    // …while the heavy pnpm tree and the operator's credentials are linked, never copied.
+    // …while the heavy pnpm tree and non-secret presets are linked.
     expect(written).toContain("link /seat/dsh-home/profiles/acp/node_modules -> /op/.dsh/profiles/acp/node_modules");
     expect(written).toContain("link /seat/dsh-home/profiles/node_modules -> /op/.dsh/profiles/node_modules");
-    expect(written).toContain("link /seat/dsh-home/.credentials.yaml -> /op/.dsh/.credentials.yaml");
-    expect(written.some((w) => w.startsWith("copy /op/.dsh/.credentials.yaml"))).toBe(false);
+    expect(written).toContain("link /seat/dsh-home/.agent-presets -> /op/.dsh/.agent-presets");
+    // F6: the operator credential store is never linked (nor copied).
+    expect(written.some((w) => w.includes(".credentials.yaml"))).toBe(false);
+    expect(links.has("/seat/dsh-home/.credentials.yaml")).toBe(false);
+    expect(actions.some((a) => a.kind === "linked-entry" && a.entry === ".credentials.yaml")).toBe(false);
     expect(actions.some((a) => a.kind === "copied-profile")).toBe(true);
-    expect(actions.some((a) => a.kind === "linked-entry" && a.entry === ".credentials.yaml")).toBe(true);
-    // A source with no .agent-presets is an honest skip, not a failure.
-    expect(actions.some((a) => a.kind === "skipped-no-source" && a.entry === ".agent-presets")).toBe(true);
+  });
+
+  it("removes an older provisioning pass's credential-store symlink", () => {
+    const { fs, links } = recorder([
+      "/op/.dsh/profiles/acp",
+      "/op/.dsh/.credentials.yaml",
+    ]);
+    // Simulate the pre-fix seat home: a symlink to the operator's whole store.
+    links.add("/seat/dsh-home/.credentials.yaml");
+    const result = provisionDshSeatHome(fs, { sourceHome: "/op/.dsh", seatHome: "/seat/dsh-home" });
+    expect(result).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "removed-credential-link", entry: ".credentials.yaml" }),
+    ]));
+    expect(links.has("/seat/dsh-home/.credentials.yaml")).toBe(false);
   });
 
   it("adopts an existing seat home instead of re-copying over what dsh wrote", () => {
@@ -205,6 +228,17 @@ describe("runner contract", () => {
     expect(cmd).toBe("node '/r.js' --session-name 's' --state-root '/st' --dsh-home '/h' --cwd '/c' --launch-id 'L' --posture floor");
   });
 
+  it("forwards a non-default dsh profile and keeps the default command unchanged", () => {
+    const base = {
+      runnerEntryPath: "/r.js", sessionName: "s", stateRoot: "/st", dshHome: "/h", cwd: "/c",
+      posture: "floor" as const, launchId: "L",
+    };
+    expect(buildDshRunnerCommand(base)).not.toContain("--profile");
+    expect(buildDshRunnerCommand({ ...base, profile: "acp" })).not.toContain("--profile");
+    expect(buildDshRunnerCommand({ ...base, profile: "custom-profile" })).toContain("--profile 'custom-profile'");
+    expect(buildDshRunnerCommand({ ...base, effort: "high" })).toContain("--effort 'high'");
+  });
+
   it("forwards a non-default dsh executable and keeps the default command unchanged", () => {
     const base = {
       runnerEntryPath: "/r.js", sessionName: "s", stateRoot: "/st", dshHome: "/h", cwd: "/c",
@@ -221,5 +255,71 @@ describe("runner contract", () => {
     expect(DSH_RUNNER_EXIT_MARKER).toBe("[dsh-runner] EXITED");
     expect(DSH_RUNNER_ERROR_MARKER).toBe("[dsh-runner] ERROR");
     expect(DSH_RESUME_TYPE).toBe("dsh_session_id");
+  });
+});
+
+describe("ACP model/effort selector mapping (F1)", () => {
+  const ADVERTISED = [{
+    id: "model",
+    name: "Model",
+    currentValue: JSON.stringify(["deepseek-official", "deepseek-v4-flash"]),
+    options: [{
+      name: "DeepSeek",
+      options: [
+        { value: JSON.stringify(["deepseek-official", "deepseek-v4-flash"]), name: "deepseek-v4-flash" },
+        { value: JSON.stringify(["openrouter", "deepseek/deepseek-chat"]), name: "deepseek-chat" },
+      ],
+    }],
+  }, {
+    id: "reasoning_effort",
+    options: [{ value: "low", name: "low" }, { value: "high", name: "high" }],
+  }];
+
+  it("maps OpenRig's provider/model to dsh's opaque JSON selector, never the raw string", () => {
+    const resolved = resolveDshConfigSelections(ADVERTISED, { model: "openrouter/deepseek/deepseek-chat" });
+    expect(resolved).toEqual({
+      ok: true,
+      selections: [{ configId: "model", value: JSON.stringify(["openrouter", "deepseek/deepseek-chat"]), label: "deepseek-chat" }],
+    });
+    if (resolved.ok) expect(JSON.parse(resolved.selections[0]!.value)).toEqual(["openrouter", "deepseek/deepseek-chat"]);
+  });
+
+  it("prefers the matching provider when the model id exists under more than one", () => {
+    const resolved = resolveDshConfigSelections(ADVERTISED, { model: "deepseek-official/deepseek-v4-flash" });
+    expect(resolved).toMatchObject({ ok: true, selections: [{ value: JSON.stringify(["deepseek-official", "deepseek-v4-flash"]) }] });
+  });
+
+  it("accepts an exact opaque selector only when dsh advertises it", () => {
+    expect(resolveDshConfigSelections(ADVERTISED, { model: JSON.stringify(["deepseek-official", "deepseek-v4-flash"]) }))
+      .toMatchObject({ ok: true });
+    expect(resolveDshConfigSelections(ADVERTISED, { model: JSON.stringify(["nope", "nope"]) }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("advertised") });
+  });
+
+  it("fails before READY, listing advertised names, when a declared model cannot be mapped", () => {
+    const resolved = resolveDshConfigSelections(ADVERTISED, { model: "deepseek/deepseek-chat" });
+    expect(resolved).toMatchObject({ ok: false });
+    if (!resolved.ok) {
+      expect(resolved.error).toContain("not available");
+      expect(resolved.error).toMatch(/deepseek-v4-flash|deepseek-chat/);
+    }
+    expect(resolveDshConfigSelections([], { model: "deepseek/deepseek-chat" }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("no model option") });
+  });
+
+  it("maps reasoning_effort and refuses an unadvertised level", () => {
+    expect(resolveDshConfigSelections(ADVERTISED, { effort: "HIGH" }))
+      .toMatchObject({ ok: true, selections: [{ configId: "reasoning_effort", value: "high" }] });
+    expect(resolveDshConfigSelections(ADVERTISED, { effort: "max" }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("advertised") });
+  });
+});
+
+describe("resume-token redaction (F11)", () => {
+  it("scrubs the requested session id and leaves ordinary text alone", () => {
+    expect(redactDshSessionId("session 4f7b4d71-0fd8-4b73-a3db-893692e6375c is not resumable", "4f7b4d71-0fd8-4b73-a3db-893692e6375c"))
+      .toBe("session [redacted-session] is not resumable");
+    expect(redactDshSessionId("plain failure", "4f7b4d71-0fd8-4b73-a3db-893692e6375c")).toBe("plain failure");
+    expect(redactDshSessionId("same", null)).toBe("same");
   });
 });

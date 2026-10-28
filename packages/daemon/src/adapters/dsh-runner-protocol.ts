@@ -72,16 +72,27 @@ export function dshSeatPaths(stateRoot: string, sessionName: string): DshSeatPat
 }
 
 // ── The seat's DSH_HOME ──────────────────────────────────────────────────────
-// The home must be writable, and it must still find the profile's bundles and
-// the operator's credentials. So the per-seat home is assembled the way
-// dsh-seat/scripts/make-seat-home.sh does it: the profile directory is a real,
-// writable COPY, and everything shared (the profile node_modules tree,
-// .credentials.yaml, .agent-presets) is SYMLINKED, never copied.
+// The home must be writable, and it must still find the profile's bundles. So
+// the per-seat home is assembled the way dsh-seat/scripts/make-seat-home.sh does
+// it: the profile directory is a real, writable COPY, and the shared NON-SECRET
+// entries (the profile node_modules tree, .agent-presets) are SYMLINKED, never
+// copied. The operator's `.credentials.yaml` is neither copied nor linked — see
+// DSH_SEAT_HOME_LINK_ENTRIES.
 
 /** Entries copied into a fresh seat home (writable, small, profile-specific). */
 export const DSH_SEAT_HOME_COPY_ENTRIES = ["profiles"] as const;
-/** Entries symlinked into a fresh seat home (shared, read-only, or secret). */
-export const DSH_SEAT_HOME_LINK_ENTRIES = [".credentials.yaml", ".agent-presets", "settings.yaml.imported"] as const;
+/** Entries symlinked into a fresh seat home (shared, read-only, NON-SECRET).
+ *
+ *  `.credentials.yaml` is deliberately absent. It is not a provider key: it holds
+ *  `records` (a browser-session secret) and `refs` for providers the seat may not
+ *  use, and a symlink lets a full_bypass seat write through to the operator's
+ *  store. Seats get credentials from the provider env allowlist
+ *  (`DSH_PROVIDER_ENV_VARS`) instead; an operator who wants a stored-credential
+ *  home can pass `OPENRIG_DSH_SHARED_HOME` (they own writability/isolation) or
+ *  provision `.credentials.yaml` inside the seat home themselves. */
+export const DSH_SEAT_HOME_LINK_ENTRIES = [".agent-presets", "settings.yaml.imported"] as const;
+/** The operator credential store a seat must never inherit as a link. */
+export const DSH_CREDENTIALS_FILE = ".credentials.yaml";
 /** The one profile a managed seat runs. `dsh --profile acp`. */
 export const DSH_DEFAULT_PROFILE = "acp";
 
@@ -94,6 +105,11 @@ export interface DshHomeFsOps {
   copyFile(source: string, target: string): void;
   copyDir?(source: string, target: string): void;
   symlink(target: string, linkPath: string): void;
+  /** Security migration for an older provisioning pass that symlinked the
+   *  operator's credential store: detect and remove that link. Optional so a
+   *  narrow test recorder still satisfies the interface. */
+  isSymlink?(path: string): boolean;
+  unlink?(path: string): void;
   /** Distinguishes a file from a directory so the profile copy can route each
    *  entry to the right operation. Absent = assume a file, which is the safe
    *  default: `copyFile` on a directory fails loudly rather than writing a file
@@ -104,6 +120,7 @@ export interface DshHomeFsOps {
 export type DshHomeAction =
   | { kind: "linked-node-modules"; from: string; to: string }
   | { kind: "linked-entry"; entry: string; from: string; to: string }
+  | { kind: "removed-credential-link"; entry: string; to: string }
   | { kind: "copied-profile"; from: string; to: string }
   | { kind: "skipped-profile-present"; to: string }
   | { kind: "skipped-no-source" | "skipped-same-home"; entry: string };
@@ -176,6 +193,15 @@ export function provisionDshSeatHome(
     actions.push({ kind: "linked-entry", entry, from, to });
   }
 
+  // F6 security migration: an older provisioning pass symlinked the operator's
+  // whole credential store into the seat. Never leave that in place, and never
+  // replace it with anything derived from the store.
+  const seatCredentials = nodePath.join(opts.seatHome, DSH_CREDENTIALS_FILE);
+  if (fs.exists(seatCredentials) && fs.isSymlink?.(seatCredentials) && fs.unlink) {
+    fs.unlink(seatCredentials);
+    actions.push({ kind: "removed-credential-link", entry: DSH_CREDENTIALS_FILE, to: seatCredentials });
+  }
+
   return actions;
 }
 
@@ -199,8 +225,6 @@ export function normalizeDshPosture(value: string | null | undefined): DshPostur
   const normalized = (value ?? "").trim().toLowerCase().replace(/-/g, "_");
   switch (normalized) {
     case "floor":
-    case "read_only":
-    case "readonly":
       return "floor";
     case "auto":
       return "auto";
@@ -248,7 +272,8 @@ export interface DshRunnerState {
   cwd?: string;
   posture?: string;
   permissionMode?: string;
-  /** The ACP session id dsh reported (`session-<uuid>`) — the resume token. */
+  /** The ACP session id dsh reported (a bare UUID; verified live on 0.2.1-rc.2
+   *  and in 0.2.0-rc.2's source) — the resume token. */
   sessionId?: string | null;
   /** dsh deliberately has no session-file handle in the ACP surface; kept
    *  optional for shape parity with the Pi sidecar and for a future surface
@@ -358,6 +383,171 @@ export function buildDshChildEnv(
   return env;
 }
 
+// ── ACP config options (model / reasoning effort) ────────────────────────────
+// dsh's model value is OPAQUE: `JSON.stringify([provider, model])` (verified live
+// on 0.2.0-rc.2 and 0.2.1-rc.2). OpenRig's model field is `provider/model`, so the
+// runner must map it against the choices dsh advertises in `session/new` /
+// `session/resume` and fail BEFORE READY when it cannot.
+
+export interface DshConfigChoice {
+  /** The opaque value to send in `session/set_config_option`. */
+  value: string;
+  /** Human name from dsh (e.g. `deepseek-v4-flash`). */
+  name?: string;
+  description?: string;
+}
+export interface DshConfigOptionGroup {
+  name?: string;
+  description?: string;
+  options?: readonly DshConfigNode[];
+}
+export type DshConfigNode = DshConfigChoice | DshConfigOptionGroup;
+
+export interface DshConfigOption {
+  id: string;
+  name?: string;
+  description?: string;
+  currentValue?: string;
+  options?: readonly DshConfigNode[];
+}
+
+export interface DshConfigSelection {
+  configId: string;
+  value: string;
+  /** Human label for the pane/error surface; never a token. */
+  label: string;
+}
+
+export type DshConfigResolution =
+  | { ok: true; selections: DshConfigSelection[] }
+  | { ok: false; error: string };
+
+function isDshConfigChoice(node: DshConfigNode): node is DshConfigChoice {
+  return typeof (node as DshConfigChoice).value === "string";
+}
+
+/** Flatten dsh's grouped choice tree into selectable values. dsh groups model
+ *  choices (e.g. by provider), so a flat `options[].value` read misses them. */
+export function flattenDshConfigChoices(option: DshConfigOption | null | undefined): DshConfigChoice[] {
+  const choices: DshConfigChoice[] = [];
+  const walk = (nodes: readonly DshConfigNode[] | undefined): void => {
+    for (const node of nodes ?? []) {
+      if (isDshConfigChoice(node)) {
+        choices.push({ value: node.value, ...(node.name ? { name: node.name } : {}), ...(node.description ? { description: node.description } : {}) });
+      } else walk(node.options);
+    }
+  };
+  walk(option?.options);
+  return choices;
+}
+
+/** Parse dsh's opaque selector value (`["provider","model"]`) into its tuple. */
+export function parseDshConfigSelector(value: string): [string, string] | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
+    if (typeof parsed[0] !== "string" || typeof parsed[1] !== "string") return null;
+    if (!parsed[0].trim() || !parsed[1].trim()) return null;
+    return [parsed[0], parsed[1]];
+  } catch {
+    return null;
+  }
+}
+
+function choiceLabel(choice: DshConfigChoice): string {
+  const tuple = parseDshConfigSelector(choice.value);
+  return choice.name?.trim() || tuple?.[1] || choice.value;
+}
+
+function advertisedList(choices: readonly DshConfigChoice[]): string {
+  return choices.map(choiceLabel).join(", ");
+}
+
+function resolveOneConfig(
+  option: DshConfigOption | undefined,
+  declared: string,
+  configId: "model" | "reasoning_effort",
+): { ok: true; choice: DshConfigChoice } | { ok: false; error: string } {
+  if (!option) {
+    return { ok: false, error: `${configId} "${declared}" is not available: dsh reported no ${configId} option in the session` };
+  }
+  const choices = flattenDshConfigChoices(option);
+  if (choices.length === 0) {
+    return { ok: false, error: `${configId} "${declared}" is not available: dsh offered no selectable ${configId} values` };
+  }
+  const lower = declared.toLowerCase();
+  const direct = choices.find((choice) => choice.value === declared
+    || choice.name?.trim().toLowerCase() === lower);
+  if (direct) return { ok: true, choice: direct };
+
+  if (configId === "model") {
+    // An already-opaque selector is accepted only if dsh advertises exactly it.
+    const declaredTuple = parseDshConfigSelector(declared);
+    if (declaredTuple) {
+      const exact = choices.find((choice) => {
+        const tuple = parseDshConfigSelector(choice.value);
+        return tuple?.[0] === declaredTuple[0] && tuple?.[1] === declaredTuple[1];
+      });
+      if (exact) return { ok: true, choice: exact };
+      return { ok: false, error: `model "${declared}" is not available in this dsh profile; advertised: ${advertisedList(choices)}` };
+    }
+    const slash = declared.indexOf("/");
+    const provider = slash > 0 ? declared.slice(0, slash) : "";
+    const modelId = slash > 0 ? declared.slice(slash + 1) : declared;
+    const byModel = choices.filter((choice) => {
+      const tuple = parseDshConfigSelector(choice.value);
+      return tuple ? tuple[1] === modelId : choice.name?.trim() === modelId;
+    });
+    if (byModel.length === 0) {
+      return { ok: false, error: `model "${declared}" is not available in this dsh profile; advertised: ${advertisedList(choices)}` };
+    }
+    const byProvider = provider
+      ? byModel.filter((choice) => {
+        const tuple = parseDshConfigSelector(choice.value);
+        if (!tuple) return false;
+        const advertisedProvider = tuple[0].toLowerCase();
+        const wantedProvider = provider.toLowerCase();
+        return advertisedProvider === wantedProvider
+          || advertisedProvider.includes(wantedProvider) || wantedProvider.includes(advertisedProvider);
+      })
+      : byModel;
+    const chosen = byProvider.length === 1 ? byProvider[0] : byModel.length === 1 ? byModel[0] : undefined;
+    if (chosen) return { ok: true, choice: chosen };
+    return { ok: false, error: `model "${declared}" matches more than one dsh model; advertised: ${advertisedList(byModel)}` };
+  }
+
+  const caseInsensitive = choices.find((choice) => choice.value.toLowerCase() === lower);
+  if (caseInsensitive) return { ok: true, choice: caseInsensitive };
+  return { ok: false, error: `${configId} "${declared}" is not available in this dsh profile; advertised: ${advertisedList(choices)}` };
+}
+
+/** Map OpenRig's declared model/effort onto dsh's advertised selector values.
+ *  A declared value that cannot be mapped is an error, never a fallback: the
+ *  seat would otherwise run a model the rig did not ask for. */
+export function resolveDshConfigSelections(
+  configOptions: readonly DshConfigOption[] | null | undefined,
+  declared: { model?: string | null; effort?: string | null },
+): DshConfigResolution {
+  const byId = new Map<string, DshConfigOption>();
+  for (const option of configOptions ?? []) {
+    if (typeof option?.id === "string") byId.set(option.id, option);
+  }
+  const selections: DshConfigSelection[] = [];
+  const model = declared.model?.trim();
+  if (model) {
+    const resolved = resolveOneConfig(byId.get("model"), model, "model");
+    if (!resolved.ok) return resolved;
+    selections.push({ configId: "model", value: resolved.choice.value, label: choiceLabel(resolved.choice) });
+  }
+  const effort = declared.effort?.trim();
+  if (effort) {
+    const resolved = resolveOneConfig(byId.get("reasoning_effort"), effort, "reasoning_effort");
+    if (!resolved.ok) return resolved;
+    selections.push({ configId: "reasoning_effort", value: resolved.choice.value, label: choiceLabel(resolved.choice) });
+  }
+  return { ok: true, selections };
+}
+
 // ── Command construction ─────────────────────────────────────────────────────
 
 export interface DshRunnerLaunchOpts {
@@ -387,6 +577,10 @@ export interface DshRunnerLaunchOpts {
    *  a non-default value is forwarded as `--dsh-command` so the adapter's
    *  dshCommand option actually reaches the child. */
   dshCommand?: string;
+  /** dsh profile the runner spawns. Defaults to `acp` (the runner's own
+   *  default); a non-default value is forwarded as `--profile` so the profile
+   *  provisioned into the seat home is the profile that actually boots. */
+  profile?: string;
   /** Optional JSON file holding the ACP `mcpServers` array. */
   mcpServersFile?: string;
 }
@@ -408,6 +602,8 @@ export function buildDshRunnerCommand(opts: DshRunnerLaunchOpts): string {
   if (opts.sessionId?.trim()) parts.push("--session", shellQuote(opts.sessionId.trim()));
   const dshCommand = opts.dshCommand?.trim();
   if (dshCommand && dshCommand !== "dsh") parts.push("--dsh-command", shellQuote(dshCommand));
+  const profile = opts.profile?.trim();
+  if (profile && profile !== DSH_DEFAULT_PROFILE) parts.push("--profile", shellQuote(profile));
   if (opts.model?.trim()) parts.push("--model", shellQuote(opts.model.trim()));
   if (opts.effort?.trim()) parts.push("--effort", shellQuote(opts.effort.trim()));
   if (opts.nodeId?.trim()) parts.push("--node-id", shellQuote(opts.nodeId.trim()));
@@ -421,8 +617,20 @@ export function buildDshChildArgs(opts: { profile?: string } = {}): string[] {
   return ["--profile", opts.profile?.trim() || DSH_DEFAULT_PROFILE];
 }
 
+// ── Resume-token redaction ───────────────────────────────────────────────────
+// The repo's resume-token contract makes the token credential-class: it must
+// never be quoted in an error, a sidecar, a log or the pane. dsh's own error text
+// can contain the requested id, so scrub it before anything is written or shown.
+
+export function redactDshSessionId(text: string, sessionId: string | null | undefined): string {
+  const token = sessionId?.trim();
+  if (!token) return text;
+  return text.split(token).join("[redacted-session]");
+}
+
 // ── Resume token shape ───────────────────────────────────────────────────────
-// A dsh session id is `session-<uuid>`: id-shaped, never a path. The resume
+// A dsh session id is a bare UUID (`randomUUID()`, verified live on both
+// 0.2.0-rc.2 and 0.2.1-rc.2): id-shaped, never a path. The resume
 // surface is `session/resume {sessionId, cwd, mcpServers}`, and dsh refuses a
 // session that is still active or whose cwd does not match exactly — which is
 // why the adapter verifies the runner came back on the requested id rather than

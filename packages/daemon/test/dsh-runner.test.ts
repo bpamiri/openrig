@@ -4,16 +4,21 @@
 // occupant-bound activity, honest death reporting) is testable with no dsh, no
 // tmux and no model.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { PassThrough, Readable } from "node:stream";
 import {
-  DshRunnerCore, MAX_DSH_INPUT_BYTES, describeDshDecision, describeDshPermission, dshPermissionDecision,
-  parseDshRunnerArgs,
-  type DshActivityPayload, type DshRunnerIo, type DshRunnerTransport,
+  DshRunnerCore, MAX_DSH_INPUT_BYTES, createDshSignalHandler, describeDshDecision, describeDshPermission,
+  dshPermissionDecision, parseDshRunnerArgs, runDshRunner,
+  type DshActivityPoster, type DshActivityPayload, type DshRunnerArgs, type DshRunnerIo, type DshRunnerTransport,
 } from "../src/adapters/dsh-runner.js";
-import { DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER, type DshRunnerState } from "../src/adapters/dsh-runner-protocol.js";
+import { createRunnerInput } from "../src/adapters/pi-runner.js";
+import {
+  DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER, type DshRunnerState,
+} from "../src/adapters/dsh-runner-protocol.js";
 
 const SESSION = "dev1-dsh@dsh-scratch";
-const SESSION_ID = "session-fac46d5a-82c0-4687-b95d-b1c9dc0bfbc";
+const SESSION_ID = "fac46d5a-82c0-4687-b95d-b1c9dc0bfbc";
 
 function fakeIo() {
   const appends: string[] = [];
@@ -261,7 +266,7 @@ describe("runner core", () => {
     expect(f.appends).toEqual([]);
 
     f.core.handleLine("/session");
-    expect(f.lines.at(-1)).toContain(`session ${SESSION_ID}`);
+    expect(f.lines.at(-1)).toContain("session [redacted-session]");
     f.core.handleLine("/usage");
     expect(f.lines.at(-1)).toContain("no usage reported yet");
     f.core.handleLine("/cancel");
@@ -278,8 +283,9 @@ describe("runner core", () => {
     const final = f.sidecars.at(-1)!;
     expect(final.ready).toBe(false);
     expect(final.exited?.reason).toMatch(/agent-exit code=3/);
-    expect(final.exited?.code).toBe(1);
-    expect(f.core.result().code).toBe(1);
+    // N3: the agent's real code is preserved; a signal death (null) is 1.
+    expect(final.exited?.code).toBe(3);
+    expect(f.core.result().code).toBe(3);
   });
 
   it("reports a failed turn instead of pretending it succeeded", async () => {
@@ -326,7 +332,7 @@ describe("runner core", () => {
     f.core.markReady({ sessionId: SESSION_ID });
     f.core.handleLine("x".repeat(MAX_DSH_INPUT_BYTES + 1));
     expect(f.prompts).toEqual([]);
-    expect(f.lines.at(-1)).toContain("input line refused");
+    expect(f.lines.at(-1)).toContain("input refused");
   });
 
   it("records a setup failure as the honest reason the seat never started", async () => {
@@ -338,5 +344,315 @@ describe("runner core", () => {
     expect(f.sidecars.at(-1)).toMatchObject({ ready: false, exited: { reason: "setup-failed" } });
     expect(f.sidecars.at(-1)?.exited?.error).toMatch(/profile/);
     expect(f.core.result().code).toBe(1);
+  });
+});
+
+// ── F10(b): runDshRunner setup wiring, with a fake ACP client ─────────────────
+
+const ADVERTISED_MODEL = JSON.stringify(["deepseek-official", "deepseek-v4-flash"]);
+const CONFIG_OPTIONS = [{
+  id: "model",
+  name: "Model",
+  currentValue: ADVERTISED_MODEL,
+  options: [{ name: "DeepSeek", options: [{ value: ADVERTISED_MODEL, name: "deepseek-v4-flash" }] }],
+}, {
+  id: "reasoning_effort",
+  options: [{ value: "low", name: "low" }, { value: "high", name: "high" }],
+}];
+
+interface SetupEvent { kind: string }
+
+class FakeAcpClient extends EventEmitter {
+  events: SetupEvent[] = [];
+  onEvent: ((kind: string) => void) | null = null;
+  private note(kind: string): void { this.events.push({ kind }); this.onEvent?.(kind); }
+  configs: Array<{ configId: string; value: string }> = [];
+  timeouts: Array<{ method: string; timeoutMs: number | undefined }> = [];
+  disposed = false;
+  prompts: string[] = [];
+  closes = 0;
+  readonly failInitialize: string | null;
+  readonly failConfig: string | null;
+  readonly resumeError: string | null;
+  readonly protocolVersion: number;
+  readonly configOptions: unknown[] | undefined;
+  readonly resumeConfigOptions: unknown[] | undefined;
+
+  constructor(opts: {
+    failInitialize?: string; failConfig?: string; resumeError?: string;
+    protocolVersion?: number; configOptions?: unknown[] | undefined; resumeConfigOptions?: unknown[] | undefined;
+  } = {}) {
+    super();
+    this.failInitialize = opts.failInitialize ?? null;
+    this.failConfig = opts.failConfig ?? null;
+    this.resumeError = opts.resumeError ?? null;
+    this.protocolVersion = opts.protocolVersion ?? 1;
+    this.configOptions = "configOptions" in opts ? opts.configOptions : CONFIG_OPTIONS;
+    this.resumeConfigOptions = opts.resumeConfigOptions;
+  }
+  start(): void { this.note("start"); }
+  async initialize(opts: { timeoutMs?: number } = {}): Promise<unknown> {
+    this.note("initialize");
+    this.timeouts.push({ method: "initialize", timeoutMs: opts.timeoutMs });
+    if (this.failInitialize) throw new Error(this.failInitialize);
+    return { protocolVersion: this.protocolVersion, agentCapabilities: { sessionCapabilities: { close: {}, resume: {}, list: {} } } };
+  }
+  async newSession(opts: { timeoutMs?: number } = {}): Promise<{ sessionId: string; configOptions?: unknown[] }> {
+    this.note("newSession");
+    this.timeouts.push({ method: "newSession", timeoutMs: opts.timeoutMs });
+    return { sessionId: SESSION_ID, ...(this.configOptions ? { configOptions: this.configOptions } : {}) };
+  }
+  async resumeSession(opts: { timeoutMs?: number } = {}): Promise<{ sessionId: string; sessionIdReported: boolean; configOptions?: unknown[] }> {
+    this.note("resumeSession");
+    this.timeouts.push({ method: "resumeSession", timeoutMs: opts.timeoutMs });
+    if (this.resumeError) throw new Error(this.resumeError);
+    return {
+      sessionId: SESSION_ID, sessionIdReported: false,
+      ...(this.resumeConfigOptions ? { configOptions: this.resumeConfigOptions } : {}),
+    };
+  }
+  async setConfigOption(opts: { configId: string; value: string; timeoutMs?: number }): Promise<unknown> {
+    this.note(`config:${opts.configId}`);
+    this.timeouts.push({ method: `config:${opts.configId}`, timeoutMs: opts.timeoutMs });
+    if (this.failConfig) throw new Error(this.failConfig);
+    this.configs.push({ configId: opts.configId, value: opts.value });
+    return {};
+  }
+  async prompt(opts: { text: string }): Promise<{ stopReason: string }> {
+    this.prompts.push(opts.text);
+    return { stopReason: "end_turn" };
+  }
+  cancel(): void {}
+  async closeSession(): Promise<unknown> { this.closes += 1; return {}; }
+  async dispose(): Promise<void> { this.disposed = true; }
+}
+
+function runSetup(opts: {
+  extraArgs?: string[]; client?: FakeAcpClient; input?: Readable; fsReadFile?: (p: string) => string;
+} = {}) {
+  const client = opts.client ?? new FakeAcpClient();
+  const writes: Array<{ kind: string; state?: DshRunnerState; order: number }> = [];
+  const timeline: string[] = [];
+  client.onEvent = (kind) => timeline.push(`client:${kind}`);
+  const output = new PassThrough();
+  let rendered = "";
+  output.on("data", (chunk) => { rendered += chunk.toString(); });
+  const fsOps = {
+    readFile: (p: string) => opts.fsReadFile ? opts.fsReadFile(p) : "[]",
+    writeFile: (p: string, content: string) => {
+      let parsed: DshRunnerState | undefined;
+      try { parsed = JSON.parse(content) as DshRunnerState; } catch { /* not a sidecar */ }
+      timeline.push(`write-sidecar:${p.includes(".tmp") ? "tmp" : "final"}:ready=${String(parsed?.ready)}`);
+      writes.push({ kind: p.includes(".tmp") ? "tmp" : "sidecar", order: timeline.length - 1, ...(parsed ? { state: parsed } : {}) });
+    },
+    mkdirp: () => {},
+    rename: () => {},
+  };
+  const args: DshRunnerArgs = parseDshRunnerArgs([
+    "--session-name", SESSION, "--state-root", "/state/dsh", "--dsh-home", "/state/dsh/h",
+    "--cwd", "/repo", "--launch-id", "launch-1", "--posture", "floor",
+    "--setup-timeout", "50",
+    ...(opts.extraArgs ?? []),
+  ], {});
+  const run = runDshRunner({
+    args, env: {}, input: opts.input ?? Readable.from([]), output: output as unknown as NodeJS.WriteStream,
+    errorOutput: output as unknown as NodeJS.WriteStream,
+    clientFactory: () => client as never,
+    activityFactory: () => ({ enabled: false, turnStart() {}, turnEnd() {}, sessionIdentity() {}, attention() {} } as DshActivityPoster),
+    fsOps, installSignalHandlers: false,
+  });
+  return { run, client, writes, timeline, rendered: () => rendered };
+}
+
+function sidecarStates(writes: Array<{ state?: DshRunnerState }>): DshRunnerState[] {
+  return writes.flatMap((write) => write.state ? [write.state] : []);
+}
+
+describe("runDshRunner setup (F1/F3/F4/F11/F12/F13)", () => {
+  it("maps the declared model to dsh's advertised selector and applies it BEFORE READY", async () => {
+    const c = runSetup({ extraArgs: ["--model", "deepseek/deepseek-v4-flash", "--effort", "high"] });
+    const result = await c.run;
+    expect(result.code).toBe(0);
+    expect(c.client.configs).toEqual([
+      { configId: "model", value: ADVERTISED_MODEL },
+      { configId: "reasoning_effort", value: "high" },
+    ]);
+    // F1: the raw provider/model string never reaches set_config_option.
+    expect(c.client.configs.some((config) => config.value === "deepseek/deepseek-v4-flash")).toBe(false);
+    // F3: the ready sidecar is written after the config calls, never before.
+    const states = sidecarStates(c.writes);
+    expect(states[0]).toMatchObject({ ready: false, launchId: "launch-1" });
+    // The ready write happens only after the model config call.
+    expect(c.timeline.indexOf("client:config:model")).toBeGreaterThan(-1);
+    expect(c.timeline.indexOf("client:config:model")).toBeLessThan(c.timeline.findIndex((entry) => entry.includes("ready=true")));
+    expect(states.some((state) => state.ready)).toBe(true);
+    expect(c.rendered()).toContain(DSH_RUNNER_READY_MARKER);
+    expect(c.rendered()).toContain("model: deepseek-v4-flash");
+  });
+
+  it("uses the setup-scoped timeout for every setup request", async () => {
+    const c = runSetup({ extraArgs: ["--model", "deepseek/deepseek-v4-flash", "--effort", "high"] });
+    await c.run;
+    expect(c.client.timeouts).toEqual([
+      { method: "initialize", timeoutMs: 50 },
+      { method: "newSession", timeoutMs: 50 },
+      { method: "config:model", timeoutMs: 50 },
+      { method: "config:reasoning_effort", timeoutMs: 50 },
+    ]);
+  });
+
+  it("maps model/effort from the config options a RESUME reports", async () => {
+    const c = runSetup({
+      extraArgs: ["--session", SESSION_ID, "--model", "deepseek/deepseek-v4-flash"],
+      client: new FakeAcpClient({ resumeConfigOptions: CONFIG_OPTIONS }),
+    });
+    const result = await c.run;
+    expect(result.code).toBe(0);
+    expect(c.client.configs).toEqual([{ configId: "model", value: ADVERTISED_MODEL }]);
+    expect(c.client.events.map((event) => event.kind)).toContain("resumeSession");
+  });
+
+  it("fails before READY when a declared model is not advertised (the -32602 class)", async () => {
+    const c = runSetup({ extraArgs: ["--model", "deepseek/deepseek-chat"] });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    expect(c.rendered()).not.toContain(DSH_RUNNER_READY_MARKER);
+    const states = sidecarStates(c.writes);
+    expect(states.some((state) => state.ready)).toBe(false);
+    expect(states.at(-1)?.exited).toMatchObject({ reason: "setup-failed" });
+    expect(states.at(-1)?.exited?.error).toContain("not available");
+    expect(states.at(-1)?.exited?.error).toContain("deepseek-v4-flash");
+    expect(c.client.configs).toEqual([]);
+    expect(c.client.disposed).toBe(true);
+  });
+
+  it("turns a rejected config option into setup-failed with no READY ever printed", async () => {
+    const c = runSetup({ client: new FakeAcpClient({ failConfig: "model unavailable" }), extraArgs: ["--model", "deepseek/deepseek-v4-flash"] });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    expect(c.rendered()).not.toContain(DSH_RUNNER_READY_MARKER);
+    expect(sidecarStates(c.writes).some((state) => state.ready)).toBe(false);
+    expect(sidecarStates(c.writes).at(-1)?.exited?.error).toContain("model unavailable");
+  });
+
+  it("refuses a dsh with a different ACP protocol version", async () => {
+    const c = runSetup({ client: new FakeAcpClient({ protocolVersion: 2 }) });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    expect(sidecarStates(c.writes).at(-1)?.exited?.error).toMatch(/ACP protocol 2/);
+  });
+
+  it("records an unreadable --mcp-servers file as setup-failed instead of throwing out", async () => {
+    const c = runSetup({
+      extraArgs: ["--mcp-servers", "/missing.json"],
+      fsReadFile: () => { throw new Error("ENOENT: /missing.json"); },
+    });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    expect(sidecarStates(c.writes).at(-1)?.exited?.error).toContain("ENOENT");
+    expect(c.client.disposed).toBe(true);
+  });
+
+  it("scrubs the requested session id out of a resume refusal (F11)", async () => {
+    const requested = "4f7b4d71-0fd8-4b73-a3db-893692e6375c";
+    const c = runSetup({
+      extraArgs: ["--session", requested],
+      client: new FakeAcpClient({ resumeError: `session is not resumable: ${requested}` }),
+    });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    // The sidecar's sessionId is the token STORE (the adapter reads it); the
+    // redaction contract is about error text, the pane and logs.
+    const errorText = `${c.rendered()}|${sidecarStates(c.writes).map((state) => state.exited?.error ?? "").join("|")}`;
+    expect(errorText).not.toContain(requested);
+    expect(errorText).toContain("[redacted-session]");
+  });
+
+  it("delivers a pane line to dsh as one prompt, and /quit shuts down with a bounded close", async () => {
+    const input = Readable.from(["hello\n/quit\n"]);
+    const c = runSetup({ input });
+    const result = await c.run;
+    expect(result.code).toBe(0);
+    expect(c.client.prompts).toEqual(["hello"]);
+    expect(c.client.closes).toBe(1);
+  });
+});
+
+describe("core lifecycle blockers (F2/F5)", () => {
+  it("keeps a multi-line paste as ONE prompt (not one prompt per line)", () => {
+    const f = fakeIo();
+    const t = fakeTransport();
+    const core = new DshRunnerCore(f.io, {
+      sessionName: SESSION, cwd: "/repo", launchId: "L", posture: "floor",
+      permissionMode: "workspace-write", nodeId: null, generation: null, runtime: "dsh",
+    }, { sessionId: SESSION_ID });
+    core.attachTransport(t.transport);
+    core.handleInput("line one\nline two\nline three");
+    expect(t.prompts).toHaveLength(1);
+    expect(t.prompts[0]!.text).toBe("line one\nline two\nline three");
+  });
+
+  it("refuses an over-limit block with the byte count", () => {
+    const f = fakeIo();
+    const t = fakeTransport();
+    const core = new DshRunnerCore(f.io, {
+      sessionName: SESSION, cwd: "/repo", launchId: "L", posture: "floor",
+      permissionMode: "workspace-write", nodeId: null, generation: null, runtime: "dsh",
+    }, { sessionId: SESSION_ID, maxInputBytes: 4 });
+    core.attachTransport(t.transport);
+    core.handleInput("12345");
+    expect(t.prompts).toEqual([]);
+    expect(f.lines.join("\n")).toContain("input refused");
+  });
+
+  it("bounds a closeSession that never settles and still disposes + records the exit", async () => {
+    const f = fakeIo();
+    const t = fakeTransport();
+    t.transport.closeSession = () => new Promise(() => {});
+    const core = new DshRunnerCore(f.io, {
+      sessionName: SESSION, cwd: "/repo", launchId: "L", posture: "floor",
+      permissionMode: "workspace-write", nodeId: null, generation: null, runtime: "dsh",
+    }, { sessionId: SESSION_ID, closeTimeoutMs: 20 });
+    core.attachTransport(t.transport);
+    const settled = await Promise.race([
+      core.shutdown("user-quit").then(() => "shutdown"),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 500)),
+    ]);
+    expect(settled).toBe("shutdown");
+    expect(t.disposals).toHaveLength(1);
+    expect(f.sidecars.at(-1)?.exited?.reason).toBe("user-quit");
+  });
+
+  it("escalates a second signal to a hard exit; the first asks the core to shut down", () => {
+    const shutdown = vi.fn(async () => {});
+    const exit = vi.fn();
+    const handler = createDshSignalHandler({ shutdown } as never, { exit });
+    handler("SIGTERM");
+    expect(shutdown).toHaveBeenCalledWith("signal-SIGTERM");
+    expect(exit).not.toHaveBeenCalled();
+    handler("SIGTERM");
+    expect(exit).toHaveBeenCalledWith(143);
+    handler("SIGINT");
+    expect(exit).toHaveBeenCalledWith(130);
+  });
+});
+
+describe("pane input seam (F2)", () => {
+  it("aggregates a bracketed paste into ONE block and enables raw mode", () => {
+    const input = Object.assign(new PassThrough(), {
+      isTTY: true, isRaw: false,
+      setRawMode: vi.fn(function (this: { isRaw: boolean }, value: boolean) { this.isRaw = value; }),
+    });
+    const output = Object.assign(new PassThrough(), { isTTY: true, columns: 80 });
+    const blocks: string[] = [];
+    const editor = createRunnerInput(input as unknown as NodeJS.ReadStream, output as unknown as NodeJS.WriteStream, (block) => blocks.push(block));
+    try {
+      input.write("\u001b[200~line one\nline two\nline three\u001b[201~\r");
+      expect(blocks).toEqual(["line one\nline two\nline three"]);
+      expect(input.setRawMode).toHaveBeenCalledWith(true);
+    } finally {
+      editor.close();
+    }
+    expect(input.isRaw).toBe(false);
   });
 });

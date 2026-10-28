@@ -28,14 +28,22 @@ import readline from "node:readline";
 import {
   DSH_DEFAULT_PROFILE, DSH_RUNNER_ERROR_MARKER, DSH_RUNNER_EXIT_MARKER, DSH_RUNNER_READY_MARKER,
   buildDshChildArgs, buildDshChildEnv, dshPermissionModeForPosture, dshSeatPaths, normalizeDshPosture,
-  parseDshRunnerState,
-  type DshPermissionMode, type DshPosture, type DshRunnerExit, type DshRunnerState,
+  parseDshRunnerState, redactDshSessionId, resolveDshConfigSelections,
+  type DshConfigOption, type DshPermissionMode, type DshPosture, type DshRunnerExit, type DshRunnerState,
 } from "./dsh-runner-protocol.js";
+import { createRunnerInput } from "./pi-runner.js";
 
 const DSH_RUNNER_VERSION = "0.1.0";
-/** A pane is a terminal, not a pipe: a single unbounded line would be a
+/** A pane is a terminal, not a pipe: a single unbounded block would be a
  *  paste-bomb. `tmux send-keys` never produces one; a human paste can. */
 export const MAX_DSH_INPUT_BYTES = 1024 * 1024;
+/** Setup-scoped bound for initialize/new/resume/set_config_option. It must stay
+ *  BELOW the adapter's readiness window (30 s), so a wedged setup makes the
+ *  runner write `exited: setup-failed` and exit instead of outliving the launch. */
+export const DSH_SETUP_TIMEOUT_MS = 20_000;
+/** Bound on the close handshake: a wedged dsh must not make `/quit` or a signal
+ *  hang forever; after this the runner disposes the child unconditionally. */
+export const DSH_CLOSE_TIMEOUT_MS = 2_000;
 
 // ── ACP client ───────────────────────────────────────────────────────────────
 
@@ -81,6 +89,9 @@ export interface AcpClientOptions {
   env: NodeJS.ProcessEnv;
   /** 0 (the default) waits forever: a model turn can legitimately take minutes. */
   requestTimeoutMs?: number;
+  /** Test seam: the family helper spawns a child; tests inject a fake one so the
+   *  NDJSON framing is exercised without a real dsh. Defaults to `spawn`. */
+  spawn?: typeof spawn;
 }
 
 export class AcpClient extends EventEmitter {
@@ -103,7 +114,8 @@ export class AcpClient extends EventEmitter {
 
   start(): void {
     if (this.child) return;
-    const child = spawn(this.options.command, this.options.args, {
+    const spawnChild = this.options.spawn ?? spawn;
+    const child = spawnChild(this.options.command, this.options.args, {
       cwd: this.options.cwd,
       env: this.options.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -231,24 +243,41 @@ export class AcpClient extends EventEmitter {
 
   // -- ACP v1 method wrappers ------------------------------------------------
 
-  initialize(opts: { clientInfo?: { name: string; version: string } } = {}): Promise<unknown> {
+  initialize(opts: { clientInfo?: { name: string; version: string }; timeoutMs?: number } = {}): Promise<unknown> {
     return this.request("initialize", {
       protocolVersion: ACP_PROTOCOL_VERSION,
       clientCapabilities: {},
       clientInfo: opts.clientInfo ?? { name: "dsh-runner", version: DSH_RUNNER_VERSION },
-    });
+    }, opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs });
   }
 
-  newSession(opts: { cwd: string; mcpServers: unknown[] }): Promise<{ sessionId: string }> {
-    return this.request("session/new", { cwd: opts.cwd, mcpServers: opts.mcpServers })
-      .then((result) => ({ sessionId: asString(asRecord(result)["sessionId"]) ?? "" }));
+  newSession(opts: { cwd: string; mcpServers: unknown[]; timeoutMs?: number }): Promise<{ sessionId: string; configOptions?: DshConfigOption[] }> {
+    return this.request("session/new", { cwd: opts.cwd, mcpServers: opts.mcpServers },
+      opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs })
+      .then((result) => {
+        const record = asRecord(result);
+        return { sessionId: asString(record["sessionId"]) ?? "", ...(configOptionsOf(record) ? { configOptions: configOptionsOf(record) } : {}) };
+      });
   }
 
-  resumeSession(opts: { sessionId: string; cwd: string; mcpServers: unknown[] }): Promise<{ sessionId: string }> {
+  /** dsh's `session/resume` result carries the config options, not a session id
+   *  (verified on both 0.2.0-rc.2 and 0.2.1-rc.2). The requested id is the id
+   *  the session keeps; success here is dsh's error-free acceptance, never a
+   *  separate id report. */
+  resumeSession(opts: { sessionId: string; cwd: string; mcpServers: unknown[]; timeoutMs?: number }): Promise<{ sessionId: string; sessionIdReported: boolean; configOptions?: DshConfigOption[] }> {
     // dsh refuses a resume whose cwd does not match the session's, and refuses a
     // session that is still active — an error here is the honest outcome.
-    return this.request("session/resume", { sessionId: opts.sessionId, cwd: opts.cwd, mcpServers: opts.mcpServers })
-      .then((result) => ({ sessionId: asString(asRecord(result)["sessionId"]) ?? opts.sessionId }));
+    return this.request("session/resume", { sessionId: opts.sessionId, cwd: opts.cwd, mcpServers: opts.mcpServers },
+      opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs })
+      .then((result) => {
+        const record = asRecord(result);
+        const reported = asString(record["sessionId"]);
+        return {
+          sessionId: reported ?? opts.sessionId,
+          sessionIdReported: reported !== undefined,
+          ...(configOptionsOf(record) ? { configOptions: configOptionsOf(record) } : {}),
+        };
+      });
   }
 
   prompt(opts: { sessionId: string; text: string }): Promise<{ stopReason: string }> {
@@ -262,14 +291,14 @@ export class AcpClient extends EventEmitter {
     this.notification("session/cancel", { sessionId: opts.sessionId });
   }
 
-  closeSession(opts: { sessionId: string }): Promise<unknown> {
-    return this.request("session/close", { sessionId: opts.sessionId });
+  closeSession(opts: { sessionId: string; timeoutMs?: number }): Promise<unknown> {
+    return this.request("session/close", { sessionId: opts.sessionId }, opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs });
   }
 
-  setConfigOption(opts: { sessionId: string; configId: string; value: string }): Promise<unknown> {
+  setConfigOption(opts: { sessionId: string; configId: string; value: string; timeoutMs?: number }): Promise<unknown> {
     return this.request("session/set_config_option", {
       sessionId: opts.sessionId, configId: opts.configId, value: opts.value,
-    });
+    }, opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs });
   }
 
   /** End stdin, wait for the child, then SIGKILL after a grace period. The
@@ -299,6 +328,16 @@ function asRecord(value: unknown): Record<string, unknown> {
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
+/** dsh advertises `configOptions` on session/new and session/resume. Keep only
+ *  objects with a string id; the pure resolver tolerates missing groups. */
+function configOptionsOf(result: Record<string, unknown>): DshConfigOption[] | undefined {
+  const raw = result["configOptions"];
+  if (!Array.isArray(raw)) return undefined;
+  const options = raw.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry))
+    .filter((entry) => typeof entry["id"] === "string")
+    .map((entry) => entry as unknown as DshConfigOption);
+  return options.length ? options : undefined;
+}
 
 // ── Runner argv contract ─────────────────────────────────────────────────────
 
@@ -319,6 +358,8 @@ export interface DshRunnerArgs {
   nodeId: string | null;
   generation: string | null;
   requestTimeoutMs: number;
+  /** Bound for the SETUP requests only; model turns stay at requestTimeoutMs. */
+  setupTimeoutMs: number;
   activity: boolean;
   resumeFallbackFresh: boolean;
   verbose: boolean;
@@ -343,6 +384,7 @@ export const DSH_RUNNER_USAGE = `dsh-runner — host a DeepSeek Harness (dsh) AC
   --node-id <id>            OpenRig node id for activity posts
   --generation <id>         occupant generation for activity posts
   --request-timeout <ms>    ACP per-request timeout (default 0 = wait)
+  --setup-timeout <ms>      bound for initialize/session/config requests (default ${DSH_SETUP_TIMEOUT_MS})
   --resume-fallback-fresh   start fresh when the resume is refused (default: fail loudly)
   --no-activity             do not post activity to the daemon
   --verbose                 print ignored protocol traffic
@@ -352,7 +394,7 @@ export const DSH_RUNNER_USAGE = `dsh-runner — host a DeepSeek Harness (dsh) AC
 const DSH_TAKES_VALUE = new Set([
   "--session-name", "--state-root", "--dsh-home", "--cwd", "--launch-id", "--posture",
   "--session", "--model", "--effort", "--mcp-servers", "--profile", "--dsh-command",
-  "--runtime-label", "--node-id", "--generation", "--request-timeout",
+  "--runtime-label", "--node-id", "--generation", "--request-timeout", "--setup-timeout",
 ]);
 
 /** Required flags are REQUIRED: a defaulted posture or cwd would be the adapter
@@ -405,7 +447,7 @@ export function parseDshRunnerArgs(argv: string[], env: Record<string, string | 
       dshCommand: values.get("--dsh-command") ?? "dsh",
       session: null, model: null, effort: null, mcpServersFile: null,
       runtimeLabel: values.get("--runtime-label") ?? "dsh",
-      nodeId: null, generation: null, requestTimeoutMs: 0,
+      nodeId: null, generation: null, requestTimeoutMs: 0, setupTimeoutMs: DSH_SETUP_TIMEOUT_MS,
       activity: true, resumeFallbackFresh: false, verbose: false, help: true,
     };
   }
@@ -416,6 +458,14 @@ export function parseDshRunnerArgs(argv: string[], env: Record<string, string | 
     requestTimeoutMs = Number(rawTimeout);
     if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs < 0) {
       throw new Error("--request-timeout requires a non-negative number");
+    }
+  }
+  const rawSetupTimeout = values.get("--setup-timeout");
+  let setupTimeoutMs = DSH_SETUP_TIMEOUT_MS;
+  if (rawSetupTimeout !== undefined) {
+    setupTimeoutMs = Number(rawSetupTimeout);
+    if (!Number.isFinite(setupTimeoutMs) || setupTimeoutMs <= 0) {
+      throw new Error("--setup-timeout requires a positive number");
     }
   }
 
@@ -437,6 +487,7 @@ export function parseDshRunnerArgs(argv: string[], env: Record<string, string | 
     nodeId: values.get("--node-id") ?? null,
     generation: values.get("--generation") ?? null,
     requestTimeoutMs,
+    setupTimeoutMs,
     activity: !flags.has("no-activity"),
     resumeFallbackFresh: flags.has("resume-fallback-fresh"),
     verbose: flags.has("verbose"),
@@ -663,11 +714,14 @@ export class DshRunnerCore {
   private resolveDone: (() => void) | null = null;
   private readonly done = new Promise<void>((resolve) => { this.resolveDone = resolve; });
 
-  constructor(io: DshRunnerIo, identity: DshRunnerIdentity, opts: { sessionId?: string | null; maxInputBytes?: number } = {}) {
+  private readonly closeTimeoutMs: number;
+
+  constructor(io: DshRunnerIo, identity: DshRunnerIdentity, opts: { sessionId?: string | null; maxInputBytes?: number; closeTimeoutMs?: number } = {}) {
     this.io = io;
     this.identity = identity;
     this.sessionId = opts.sessionId ?? null;
     this.maxInputBytes = opts.maxInputBytes ?? MAX_DSH_INPUT_BYTES;
+    this.closeTimeoutMs = opts.closeTimeoutMs ?? DSH_CLOSE_TIMEOUT_MS;
   }
 
   /** Everything the core needs from the transport, in one place. Kept as a
@@ -737,18 +791,28 @@ export class DshRunnerCore {
 
   // -- input ----------------------------------------------------------------
 
-  /** One pane line. Local commands are the runner's; everything else is work.
-   *  A line with no newline for a very long time is a paste bomb, not a prompt. */
-  handleLine(rawLine: string): void {
-    const line = rawLine.replace(/\r$/, "");
+  /** One pane input block. The pane input helper (the Pi-family
+   *  `createRunnerInput`) submits a single line, or a whole paste as ONE block,
+   *  so a multi-line message stays one prompt. Local commands are the runner's;
+   *  everything else is work. A block with no newline for a very long time is a
+   *  paste bomb, not a prompt. */
+  handleInput(rawBlock: string): void {
     if (this.shuttingDown) return;
-    if (line.length > this.maxInputBytes) {
-      this.io.mirrorLine(`${DSH_RUNNER_ERROR_MARKER} input line refused: ${line.length} bytes exceeds the ${this.maxInputBytes}-byte limit`);
+    const block = rawBlock.replace(/\r$/, "");
+    const bytes = Buffer.byteLength(block);
+    if (bytes > this.maxInputBytes) {
+      this.io.mirrorLine(`${DSH_RUNNER_ERROR_MARKER} input refused: ${bytes} bytes exceeds the ${this.maxInputBytes}-byte limit`);
       return;
     }
-    if (!line.trim()) return;
-    if (line.startsWith("/") && this.handleLocalCommand(line.trim())) return;
-    this.enqueue(line);
+    if (!block.trim()) return;
+    const singleLine = !block.includes("\n") && !block.includes("\r");
+    if (singleLine && block.trim().startsWith("/") && this.handleLocalCommand(block.trim())) return;
+    this.enqueue(block);
+  }
+
+  /** Back-compat for callers/tests that hand the core one line. */
+  handleLine(rawLine: string): void {
+    this.handleInput(rawLine);
   }
 
   handleInputClosed(): void {
@@ -762,7 +826,7 @@ export class DshRunnerCore {
         this.io.mirrorLine("local: /help /session /usage /cancel /quit — anything else is sent to the agent");
         return true;
       case "session":
-        this.io.mirrorLine(`[dsh-runner] session ${this.sessionId ?? "(none)"} · cwd ${this.identity.cwd}`);
+        this.io.mirrorLine(`[dsh-runner] session ${this.sessionId ? "[redacted-session]" : "(none)"} · cwd ${this.identity.cwd}`);
         return true;
       case "usage":
         this.io.mirrorLine(this.lastUsagePercent === null
@@ -901,7 +965,9 @@ export class DshRunnerCore {
       // A child that dies on its own is an agent failure, not a seat shutdown:
       // say so rather than leaving a pane that looks alive.
       this.exitReason = `agent-exit code=${opts.code} signal=${opts.signal}`;
-      this.exitCode = opts.code === 0 ? 0 : 1;
+      // N3: keep the agent's real code; a null code (signal death) still reads
+      // as a seat failure, and the reason string always carries the signal.
+      this.exitCode = opts.code === null ? 1 : opts.code;
     }
     this.finish();
   }
@@ -914,7 +980,16 @@ export class DshRunnerCore {
     const transport = this.transport;
     const sessionId = this.sessionId;
     if (transport && sessionId) {
-      try { await transport.closeSession(sessionId); } catch { /* the agent may already be gone */ }
+      // Bounded: a wedged closeSession must not make /quit or a signal hang.
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          Promise.resolve(transport.closeSession(sessionId)).catch(() => { /* the agent may already be gone */ }),
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, this.closeTimeoutMs); timer.unref?.(); }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
     try { await transport?.dispose(); } catch { /* idempotent */ }
     this.finish();
@@ -948,6 +1023,39 @@ export class DshRunnerCore {
 
   result(): DshRunnerResult {
     return { code: this.exitCode, sessionId: this.sessionId, exitReason: this.exitReason };
+  }
+}
+
+/** F5: the first signal asks the core to shut down (bounded); a second signal
+ *  escalates to a hard exit so a wedged dsh cannot trap the seat. */
+export function createDshSignalHandler(
+  core: Pick<DshRunnerCore, "shutdown">,
+  opts: { exit?: (code: number) => void } = {},
+): (signal: NodeJS.Signals) => void {
+  let signals = 0;
+  const exit = opts.exit ?? ((code: number) => { process.exit(code); });
+  return (signal) => {
+    signals += 1;
+    if (signals > 1) {
+      exit(signal === "SIGINT" ? 130 : 143);
+      return;
+    }
+    void core.shutdown(`signal-${signal}`);
+  };
+}
+
+/** F13: refuse a dsh that speaks a different ACP version or lacks the session
+ *  capabilities this runner actually uses. */
+function assertDshAcpSurface(result: unknown): void {
+  const record = asRecord(result);
+  const version = record["protocolVersion"];
+  if (version !== ACP_PROTOCOL_VERSION) {
+    throw new Error(`dsh speaks ACP protocol ${String(version)}; OpenRig requires ${ACP_PROTOCOL_VERSION}`);
+  }
+  const capabilities = asRecord(asRecord(record["agentCapabilities"])["sessionCapabilities"]);
+  const missing = ["close", "resume"].filter((name) => capabilities[name] === undefined);
+  if (missing.length > 0) {
+    throw new Error(`dsh does not advertise the ACP session capabilities OpenRig needs: ${missing.join(", ")}`);
   }
 }
 
@@ -1009,7 +1117,6 @@ export async function runDshRunner(options: RunDshRunnerOptions): Promise<DshRun
   const paths = dshSeatPaths(args.stateRoot, args.sessionName);
   const posture = args.posture;
   const permissionMode = dshPermissionModeForPosture(posture);
-  const mcpServers = readMcpServers(args.mcpServersFile, fsOps);
 
   const activity = activityFactory({
     sessionName: args.sessionName,
@@ -1091,8 +1198,10 @@ export async function runDshRunner(options: RunDshRunnerOptions): Promise<DshRun
     dispose: (opts) => client.dispose(opts),
   });
 
-  client.on("stderr", ({ line }) => { if (line.trim()) output.write(`[dsh] ${line}\n`); });
-  client.on("stdout", ({ line }) => output.write(`[dsh-runner] unexpected agent stdout: ${line.slice(0, 200)}\n`));
+  // A dsh diagnostic can contain the requested session id; scrub it the same way
+  // before anything reaches the pane.
+  client.on("stderr", ({ line }) => { if (line.trim()) output.write(`[dsh] ${redactDshSessionId(line, args.session)}\n`); });
+  client.on("stdout", ({ line }) => output.write(`[dsh-runner] unexpected agent stdout: ${redactDshSessionId(line.slice(0, 200), args.session)}\n`));
   client.on("notification", ({ method, params }) => core.handleNotification(method, params));
   client.on("request", ({ method, params, respond }) => {
     const outcome = core.handleRequest(method, params);
@@ -1113,39 +1222,57 @@ export async function runDshRunner(options: RunDshRunnerOptions): Promise<DshRun
     activityRequested: args.activity,
   });
 
-  const onSignal = (signal: NodeJS.Signals): void => {
-    void core.shutdown(`signal-${signal}`);
-  };
+  const onSignal = createDshSignalHandler(core);
   if (installSignalHandlers) {
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
   }
 
   try {
+    // F12: an unreadable --mcp-servers file is an honest setup failure (sidecar
+    // + error marker), never a throw out of the process with no record.
+    const mcpServers = readMcpServers(args.mcpServersFile, fsOps);
     client.start();
-    await client.initialize();
+    const init = await client.initialize({ timeoutMs: args.setupTimeoutMs });
+    assertDshAcpSurface(init);
+    let setup: { sessionId: string; configOptions?: DshConfigOption[] };
     if (args.session) {
       try {
-        const resumed = await client.resumeSession({ sessionId: args.session, cwd: args.cwd, mcpServers });
-        output.write(`[dsh-runner] resumed session ${resumed.sessionId}\n`);
-        core.markReady({ sessionId: resumed.sessionId });
+        // F16: dsh's resume result does not re-report the id; success is dsh's
+        // error-free acceptance, and the requested id is the conversation that
+        // keeps running. The sidecar records it for the next resume.
+        setup = await client.resumeSession({ sessionId: args.session, cwd: args.cwd, mcpServers, timeoutMs: args.setupTimeoutMs });
+        // The token is credential-class; never echo it into the captured pane.
+        output.write("[dsh-runner] resumed the requested session\n");
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        // F11: dsh's own refusal text can contain the requested id; scrub it
+        // before it reaches the pane, the sidecar or the adapter.
+        const message = redactDshSessionId(err instanceof Error ? err.message : String(err), args.session);
         if (!args.resumeFallbackFresh) throw new Error(`resume refused: ${message}`);
         output.write(`${DSH_RUNNER_ERROR_MARKER} resume failed (${message}); starting a fresh session\n`);
-        const created = await client.newSession({ cwd: args.cwd, mcpServers });
-        core.markReady({ sessionId: created.sessionId });
+        setup = await client.newSession({ cwd: args.cwd, mcpServers, timeoutMs: args.setupTimeoutMs });
+        output.write("[dsh-runner] session created\n");
       }
     } else {
-      const created = await client.newSession({ cwd: args.cwd, mcpServers });
-      output.write(`[dsh-runner] session ${created.sessionId}\n`);
-      core.markReady({ sessionId: created.sessionId });
+      setup = await client.newSession({ cwd: args.cwd, mcpServers, timeoutMs: args.setupTimeoutMs });
+      output.write("[dsh-runner] session created\n");
     }
 
-    if (args.model) await client.setConfigOption({ sessionId: core.currentSessionId ?? "", configId: "model", value: args.model });
-    if (args.effort) await client.setConfigOption({ sessionId: core.currentSessionId ?? "", configId: "reasoning_effort", value: args.effort });
+    // F1/F3: map the declared model/effort onto dsh's advertised selector values
+    // and apply them BEFORE READY. An unmappable value fails setup; a READY can
+    // therefore never be followed by a model-config death.
+    const resolved = resolveDshConfigSelections(setup.configOptions, { model: args.model, effort: args.effort });
+    if (!resolved.ok) throw new Error(resolved.error);
+    for (const selection of resolved.selections) {
+      await client.setConfigOption({
+        sessionId: setup.sessionId, configId: selection.configId, value: selection.value, timeoutMs: args.setupTimeoutMs,
+      });
+      output.write(`[dsh-runner] ${selection.configId}: ${selection.label}\n`);
+    }
+
+    core.markReady({ sessionId: setup.sessionId });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = redactDshSessionId(err instanceof Error ? err.message : String(err), args.session);
     core.markSetupFailed({ error: message });
     if (installSignalHandlers) {
       process.off("SIGINT", onSignal);
@@ -1155,9 +1282,11 @@ export async function runDshRunner(options: RunDshRunnerOptions): Promise<DshRun
     return core.result();
   }
 
-  const reader = readline.createInterface({ input, crlfDelay: Infinity, terminal: false });
-  reader.on("line", (line) => core.handleLine(line));
-  reader.on("close", () => core.handleInputClosed());
+  // F2: the family's raw-mode input helper aggregates a paste into ONE block
+  // (and enforces the byte limit) instead of letting the canonical tty truncate
+  // or split a long/multi-line `rig send` before this runner sees it.
+  const editor = createRunnerInput(input, output, (block) => core.handleInput(block));
+  editor.on("close", () => core.handleInputClosed());
 
   await core.finished;
 
@@ -1165,7 +1294,7 @@ export async function runDshRunner(options: RunDshRunnerOptions): Promise<DshRun
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
-  reader.close();
+  editor.close();
   return core.result();
 }
 
