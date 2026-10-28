@@ -751,6 +751,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
     { stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath },
   );
+  // OPR.0.6.DSH1 — dsh owns its own runner (dsh is not a Pi dialect) and its
+  // resume token is the ACP session id, so it gets its own state root and its
+  // own resume leg rather than a third member of the Pi runner.
+  const dshStateRoot = nodePath.join(OPENRIG_HOME, "state", "dsh");
+  const dshRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/dsh-runner.js");
+  const { DshResumeAdapter } = await import("./adapters/dsh-resume.js");
+  const dshResume = new DshResumeAdapter({
+    tmux: tmuxAdapter,
+    seatLaunchEnvironment,
+    // dsh's seat home has to be assembled from the operator's, so the resume
+    // path needs the same filesystem surface the adapter uses.
+    fs: {
+      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      exists: (p: string) => fs.existsSync(p),
+      mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+      readDir: (p: string) => fs.readdirSync(p),
+      copyDir: (src: string, dest: string) => fs.cpSync(src, dest, { recursive: true }),
+      symlink: (target: string, linkPath: string) => fs.symlinkSync(target, linkPath),
+      copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
+      statKind: (p: string) => (fs.statSync(p).isDirectory() ? "directory" : "file"),
+    },
+    stateRoot: dshStateRoot,
+    runnerEntryPath: dshRunnerEntryPath,
+  });
   // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it
   const { ComposeServicesAdapter } = await import("./adapters/compose-services-adapter.js");
   const { ServiceOrchestrator } = await import("./domain/service-orchestrator.js");
@@ -769,7 +794,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
-    checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume,
+    checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume, dshResume,
     transcriptStore, serviceOrchestrator,
     freshLaunch: async (rigId, nodeId) => persistedFreshPodLaunch
       ? persistedFreshPodLaunch(rigId, nodeId)
@@ -917,6 +942,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { CodexRuntimeAdapter } = await import("./adapters/codex-runtime-adapter.js");
   const { PiRuntimeAdapter } = await import("./adapters/pi-runtime-adapter.js");
   const { OmpRuntimeAdapter } = await import("./adapters/omp-runtime-adapter.js");
+  const { DshRuntimeAdapter } = await import("./adapters/dsh-runtime-adapter.js");
 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
@@ -941,7 +967,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
   const stubRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/stub-runner.js");
-  const stubAdapter = new StubRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, runnerEntryPath: stubRunnerEntryPath });
+  const dshAdapter = new DshRuntimeAdapter({
+    tmux: tmuxAdapter,
+    seatLaunchEnvironment,
+    fsOps: {
+      readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+      writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+      exists: (p: string) => fs.existsSync(p),
+      mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+      listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; },
+      readDir: (p: string) => fs.readdirSync(p),
+      copyDir: (src: string, dest: string) => fs.cpSync(src, dest, { recursive: true }),
+      symlink: (target: string, linkPath: string) => fs.symlinkSync(target, linkPath),
+      copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
+      statKind: (p: string) => (fs.statSync(p).isDirectory() ? "directory" : "file"),
+    },
+    stateRoot: dshStateRoot,
+    runnerEntryPath: dshRunnerEntryPath,
+  });
+  const stubAdapter = new StubRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, runnerEntryPath: stubRunnerEntryPath });
 
   // plugin-primitive Phase 3a slice 3.5 — ensure Codex feature flag
   // codex_hooks = true is set in ~/.codex/config.toml so plugin-shipped
@@ -1134,7 +1178,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment }),
+    adapters: withCommunityHarnesses({ "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "dsh": dshAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() }, { tmux: tmuxAdapter, seatLaunchEnvironment }),
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -1196,6 +1240,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "codex": codexAdapter,
     "pi": piAdapter,
     "omp": ompAdapter,
+    "dsh": dshAdapter,
     "stub": stubAdapter,
     "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter(),
   }, { tmux: tmuxAdapter, seatLaunchEnvironment });
@@ -1337,6 +1382,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,
     ompRunnerStateStore: ompAdapter,
+    dshRunnerStateStore: dshAdapter,
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,
@@ -2592,6 +2638,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     codex: codexAdapter,
     pi: piAdapter,
     omp: ompAdapter,
+    dsh: dshAdapter,
   }, usageSamplesStore, () => providerWindowSamplesFromSignals(
     collectClaudeSignalsFromProviderUsageDirectory(
       providerUsageDirectory(OPENRIG_HOME),

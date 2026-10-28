@@ -82,6 +82,26 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendText).toHaveBeenCalledOnce();
   });
 
+  // OPR.0.6.DSH1 — a dsh seat's foreground is the OpenRig-owned dsh runner
+  // (`node`), which is the thing that turns pane input into session/prompt. It is
+  // not a shell, so the #142 guard must not refuse it. The guard still has to
+  // catch the honest failure: a dead dsh runner leaves the pane at a shell.
+  it("dsh seat: the runner's node foreground is delivery-ready, its dead-runner shell is not", async () => {
+    const { node } = seat("dsh", "dev-dsh@my-rig");
+
+    const live = tmuxWithPane(async () => "node");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-dsh@my-rig", tmuxPane: "%1" });
+    const delivered = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: live.tmux }), "dev-dsh@my-rig");
+    expect(delivered, JSON.stringify(delivered)).toMatchObject({ ok: true });
+    expect(live.sendText).toHaveBeenCalledOnce();
+
+    const dead = tmuxWithPane(async () => "zsh");
+    const refused = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: dead.tmux }), "dev-dsh@my-rig");
+    expect(refused).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(refused.error).toContain("zsh as the foreground command");
+    expect(dead.sendText).not.toHaveBeenCalled();
+  });
+
   // 2026-09-29 guest: the ready checker still read as bash at the #142 guard.
   // Model its pane -> sh -> Node launcher -> native Codex chain. Process-group
   // and start-time values below are synthetic; native execution remains a separate check.

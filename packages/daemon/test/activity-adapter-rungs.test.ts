@@ -5,6 +5,7 @@ import {
   CODEX_ACTIVITY_RUNG_INVENTORY,
   TMUX_GENERIC_RUNG_INVENTORY,
   PI_ACTIVITY_RUNG_INVENTORY,
+  DSH_ACTIVITY_RUNG_INVENTORY,
   runtimeRungInventory,
 } from "../src/domain/activity-taxonomy.js";
 import { readClaudeSelfReportEvidence, type ClaudeSelfReportRead } from "../src/adapters/claude-code-adapter.js";
@@ -36,8 +37,18 @@ describe("S19 A5 — per-harness rung inventories (one data source)", () => {
     expect(runtimeRungInventory("claude-code")).toBe(CLAUDE_ACTIVITY_RUNG_INVENTORY);
     expect(runtimeRungInventory("codex")).toBe(CODEX_ACTIVITY_RUNG_INVENTORY);
     expect(runtimeRungInventory("pi")).toBe(PI_ACTIVITY_RUNG_INVENTORY);
+    expect(DSH_ACTIVITY_RUNG_INVENTORY.rungs).toEqual(PI_ACTIVITY_RUNG_INVENTORY.rungs);
+    expect(runtimeRungInventory("dsh")).toBe(DSH_ACTIVITY_RUNG_INVENTORY);
     expect(runtimeRungInventory("terminal")).toBe(TMUX_GENERIC_RUNG_INVENTORY);
     expect(runtimeRungInventory(null)).toBe(TMUX_GENERIC_RUNG_INVENTORY);
+  });
+
+  it("dsh's ACP runner owns the turn boundaries: durable hooks above sampling, the runner shape", () => {
+    const rungs = new Map(DSH_ACTIVITY_RUNG_INVENTORY.rungs.map((r) => [r.rung, r]));
+    expect(DSH_ACTIVITY_RUNG_INVENTORY.runtime).toBe("dsh");
+    expect(rungs.get("lifecycle-hooks")!.durableBoundaries).toBe(true);
+    expect(rungs.get("lifecycle-hooks")!.initialTrust).toBe("authoritative");
+    expect(rungs.get("window-sampling")!.initialTrust).toBe("positive-only");
   });
 });
 

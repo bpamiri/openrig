@@ -111,7 +111,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness";
+  runtime: "claude-code" | "codex" | "pi" | "omp" | "dsh" | "tmux-generic" | "community-harness";
   rungs: RungDeclaration[];
 }
 
@@ -220,9 +220,9 @@ export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: [{ rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" }],
 };
 
-/** pi and omp run under OpenRig's runner, which reads the child's RPC event stream and posts each turn boundary as a
- *  hook (agent_start, turn_start, tool calls, agent_end; attention; process exit). Those hooks decide, and a boundary
- *  holds until the next one. A quiet pane can be mid-turn, so window sampling stays positive-only. */
+/** pi, omp and dsh run under OpenRig's runner, which reads the child's RPC/ACP event stream and posts each turn
+ *  boundary as a hook (agent_start, turn_start, tool calls, agent_end; attention; process exit). Those hooks decide,
+ *  and a boundary holds until the next one. A quiet pane can be mid-turn, so window sampling stays positive-only. */
 const RUNNER_ACTIVITY_RUNGS: RungDeclaration[] = [
   { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative", durableBoundaries: true },
   { rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" },
@@ -240,6 +240,14 @@ export const OMP_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: RUNNER_ACTIVITY_RUNGS,
 };
 
+/** dsh's OpenRig-owned ACP runner reads every turn boundary off its child's protocol stream, so it earns the same
+ *  durable-boundary declaration as Pi and OMP. */
+export const DSH_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "dsh-runtime-adapter",
+  runtime: "dsh",
+  rungs: RUNNER_ACTIVITY_RUNGS,
+};
+
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
  *  Unknown runtimes get the generic floor — partial-coverage honesty by default. A seat launched for a community
  *  community harness (its session's recorded selection, still the node's runtime) gets that app's inventory. */
@@ -248,6 +256,7 @@ export function runtimeRungInventory(runtime: string | null, communityHarness?: 
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "pi") return PI_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "omp") return OMP_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "dsh") return DSH_ACTIVITY_RUNG_INVENTORY;
   if (communityHarnessOf(communityHarness, runtime)) return COMMUNITY_HARNESS_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }

@@ -42,6 +42,8 @@ describe("AgentActivityStore", () => {
     ["codex", "PermissionPromptCleared", null, "unknown"],
     ["codex", "Notification", "permission_prompt", "needs_input"],
     ["codex", "at_limit", null, "unknown"],
+    ["dsh", "Notification", "permission_unanswerable", "needs_input"],
+    ["dsh", "Notification", "prompt_failed", "unknown"],
   ] as const)("shared hook mapping retains %s/%s with fresh and clock-stale evidence", (runtime, hookEvent, subtype, state) => {
     const { node, sessionName } = seedSession(runtime);
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });

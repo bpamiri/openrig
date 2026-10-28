@@ -410,6 +410,15 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(normalized.nodes).toHaveLength(2);
   });
 
+  it("legacy flat-node schema admits the dsh runtime", () => {
+    const legacySpec = {
+      schema_version: 1, name: "test", version: "1.0",
+      nodes: [{ id: "impl", runtime: "dsh", role: "impl" }],
+      edges: [],
+    };
+    expect(LegacyRigSpecSchema.validate(legacySpec).valid).toBe(true);
+  });
+
   // -- Checkpoint 1 review fix regressions --
 
   // R2: startup action missing value rejected

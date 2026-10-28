@@ -218,6 +218,9 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         const access = runtime === "terminal" ? "Terminal shell; no native agent permission flag"
           : basis === "unresolved" ? `unresolved policy: ${policy}`
           : runtime === "pi" ? `${posture === "full_bypass" ? "Permission prompts: off; Pi gets full resource trust (full_bypass / approve)" : "resource trust resolved at launch"}; not a native permission policy`
+          : runtime === "dsh" ? (posture === "full_bypass" ? "Permission prompts: off; dsh runs with danger-full-access and its runner auto-approves escalations (full_bypass)"
+            : posture === "auto" ? "workspace-write; dsh escalations are allowed once (auto)"
+            : "workspace-write; dsh escalations are refused (floor)")
           : posture === "full_bypass" ? runtime === "claude-code" ? "Permission prompts: off; Claude bypasses permissions (full_bypass)"
             : runtime === "codex" ? "Permission prompts: off; Codex runs with full access and never asks (full_bypass)"
             : "full_bypass: native permission bypass / unrestricted sandbox requested"

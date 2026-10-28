@@ -13,6 +13,7 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "codex": "codex --version",
   "pi": "pi --version",
   "omp": "omp --version",
+  "dsh": "dsh --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -440,6 +441,7 @@ async function preflightMembers(
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec, warnings);
     errors.push(...piErrors);
     errors.push(...await verifyOmpRuntimeAvailable(rigSpec, preflightCtx.exec));
+    errors.push(...await verifyDshRuntimeAvailable(rigSpec, preflightCtx.exec));
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -505,6 +507,22 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     const timedOut = runtimeProbeTimeout(err);
     if (timedOut) return [timedOut];
     return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
+  }
+}
+
+/**
+ * OPR.0.6.DSH1 — async post-preflight probe: when the spec declares any
+ * `runtime: "dsh"` member, verify the `dsh` binary answers `dsh --version`.
+ * Same posture as the OMP probe: an error, not an advisory, because a dsh seat
+ * that cannot find dsh has no fallback surface at all.
+ */
+export async function verifyDshRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecFn): Promise<string[]> {
+  if (!rigSpec.pods.some((pod) => pod.members.some((member) => member.runtime === "dsh"))) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["dsh"]!);
+    return [];
+  } catch (err) {
+    return [`Runtime "dsh" not available ('dsh --version' failed: ${runtimeProbeFailure(err)}). If the DeepSeek Harness is not installed, install @deepseek-ai/dsh and ensure 'dsh' is on PATH.`];
   }
 }
 

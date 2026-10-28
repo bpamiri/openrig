@@ -238,6 +238,11 @@ describe("classifyPaneRuntimeMatch", () => {
     expect(classifyPaneRuntimeMatch("-bash", "codex")).toBe("mismatch");
   });
 
+  it("a dsh seat runs behind the OpenRig runner: `node` is a MATCH, a bare shell is a MISMATCH", () => {
+    expect(classifyPaneRuntimeMatch("node", "dsh")).toBe("match");
+    expect(classifyPaneRuntimeMatch("zsh", "dsh")).toBe("mismatch");
+  });
+
   it("a shell for a terminal (infrastructure) node is expected — MATCH", () => {
     expect(classifyPaneRuntimeMatch("zsh", "terminal")).toBe("match");
   });

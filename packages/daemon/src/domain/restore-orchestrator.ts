@@ -26,6 +26,7 @@ import { seatRuntimeHome } from "./seat-runtime-home.js";
 import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
+import type { DshResumeAdapter } from "../adapters/dsh-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
@@ -220,6 +221,9 @@ interface RestoreOrchestratorDeps {
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
   ompResume?: OmpResumeAdapter;
+  /** OPR.0.6.DSH1 — dsh's resume token is the ACP session id, so it needs its
+   *  own leg rather than a third `_session_file` variant. */
+  dshResume?: DshResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -249,6 +253,7 @@ export class RestoreOrchestrator {
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
   private ompResume: OmpResumeAdapter | null;
+  private dshResume: DshResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
@@ -292,6 +297,7 @@ export class RestoreOrchestrator {
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
     this.ompResume = deps.ompResume ?? null;
+    this.dshResume = deps.dshResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
@@ -684,7 +690,7 @@ export class RestoreOrchestrator {
             const runtime = allNodes.find(current => current.id === node.id)?.runtime ?? node.runtime;
             // Launch needs consistent positive evidence: both samples idle with the same fingerprint, and the
             // bound pane still in this session (a recycled pane id could name another session's shell).
-            if (pane && (["claude-code", "codex", "pi", "omp"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
+            if (pane && (["claude-code", "codex", "pi", "omp", "dsh"].includes(runtime ?? "") || communityHarnessOf(session.communityHarness, runtime))
               && isShellForeground(await this.tmuxAdapter.getPaneCommand(pane) ?? "")
               && (await this.tmuxAdapter.listPanes(session.sessionName)).some(candidate => candidate.id === pane)
               && (await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses }, { unknownKeepsIdle: false })).state === "idle_shell"
@@ -2204,7 +2210,8 @@ export class RestoreOrchestrator {
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
-        : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
+        : this.codexResume.canResume(resumeType, resumeToken) ? "codex"
+        : this.dshResume?.canResume(resumeType, resumeToken) ? "dsh" : "pi";
       const override = new NativePermissionStore(this.db).launchOverride(nodeId, runtime);
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
@@ -2320,6 +2327,23 @@ export class RestoreOrchestrator {
       return { kind: "failed", message: result.message };
     }
 
+
+    // OPR.0.6.DSH1 — dsh continuation. dsh's session id is id-shaped and dsh
+    // itself refuses a resume whose cwd differs or whose session is still
+    // active, so the adapter demands proof the runner came back on the exact
+    // requested id; a mismatch is retry_fresh, never a silent fresh seat.
+    if (this.dshResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.dshResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture, {
+        nodeId,
+        launchGeneration,
+      });
+      if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      return { kind: "failed", message: result.message };
+    }
 
     return { kind: "failed", message: "No resume adapter available for this runtime/token combination." };
   }

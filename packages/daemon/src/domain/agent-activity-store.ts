@@ -364,7 +364,8 @@ export function hookEventState(rawEvent: string | null | undefined, rawSubtype: 
   if (rawEvent === "PermissionRequest") return seatRuntime === "codex" ? "unknown" : "needs_input";
   if (rawEvent === "PermissionPromptConfirmed") return "needs_input";
   if (rawEvent === "Notification") {
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
+    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")
+      || (seatRuntime === "dsh" && rawSubtype === "permission_unanswerable")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
   }
   // The runner posts Stop when its child process exits: nothing is at a prompt, so it isn't idle.

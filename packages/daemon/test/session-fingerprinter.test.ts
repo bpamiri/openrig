@@ -127,6 +127,21 @@ describe("SessionFingerprinter", () => {
     expect((await bare.fingerprint(makePane({ activeCommand: "node" }))).runtimeHint).toBe("unknown");
   });
 
+  it("recognizes only an explicit managed dsh runner, not a bare node pane", async () => {
+    // A dsh seat's runner is `node`, and dsh has no first-party TUI banner to
+    // fingerprint — the runner's READY marker is the only runtime evidence.
+    const fp = new SessionFingerprinter({
+      cmuxAdapter: mockCmux(),
+      tmuxAdapter: mockTmux("[dsh-runner] READY"),
+      fsExists: () => false,
+    });
+    const managed = await fp.fingerprint(makePane({ activeCommand: "node" }));
+    expect(managed).toMatchObject({ runtimeHint: "dsh", confidence: "medium" });
+
+    const bare = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux("$ node"), fsExists: () => false });
+    expect((await bare.fingerprint(makePane({ activeCommand: "node" }))).runtimeHint).toBe("unknown");
+  });
+
   it("keeps Claude/Codex pane evidence ahead of a stale OMP READY line", async () => {
     for (const [banner, runtimeHint] of [["Claude Code v2.1.0", "claude-code"], ["Codex CLI v0.50.0", "codex"]] as const) {
       const fp = new SessionFingerprinter({

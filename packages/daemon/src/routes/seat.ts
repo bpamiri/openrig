@@ -217,6 +217,14 @@ function handoverDeps(c: Context): ConstructorParameters<typeof SeatHandoverServ
         ? { readSessionFile: omp.readSessionFile.bind(omp) }
         : undefined;
     })(),
+    // A dsh token is the ACP session id in the runner's sidecar, not a session file.
+    dshRunnerStateStore: (() => {
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const dsh = adapters?.["dsh"] as { readSessionId?: (sessionName: string) => { ok: true; sessionId: string } | { ok: false; reason: string } } | undefined;
+      return typeof dsh?.readSessionId === "function"
+        ? { readSessionId: dsh.readSessionId.bind(dsh) }
+        : undefined;
+    })(),
     // GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator so commit()'s re-key call fires
     // (invalidate the retiring occupant's seat-name-keyed stores before the successor accumulates any).
     occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,

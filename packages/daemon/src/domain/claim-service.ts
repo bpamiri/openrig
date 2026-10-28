@@ -123,6 +123,9 @@ interface ClaimServiceDeps {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   };
   ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
+  /** OPR.0.6.DSH1 — dsh-runner sidecar reader. A dsh token is the ACP session
+   *  id dsh reported, not a session file. */
+  dshRunnerStateStore?: ResumeTokenCaptureDeps["dshRunnerStateStore"];
 }
 
 interface BindOptions {
@@ -161,6 +164,7 @@ export class ClaimService {
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
   /** Delivers the claim hint the way the startup retry is delivered (startup-orchestrator.ts builds the same transport). */
   private sessionTransport: SessionTransport | null;
+  private dshRunnerStateStore: ClaimServiceDeps["dshRunnerStateStore"] | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -184,6 +188,7 @@ export class ClaimService {
     this.sessionTransport = this.tmuxAdapter ? new SessionTransport({
       db: deps.db, rigRepo: deps.rigRepo, sessionRegistry: deps.sessionRegistry, tmuxAdapter: this.tmuxAdapter, eventBus: deps.eventBus,
     }) : null;
+    this.dshRunnerStateStore = deps.dshRunnerStateStore ?? null;
   }
 
   private async observeBindingPane(
@@ -299,7 +304,7 @@ export class ClaimService {
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
         { runtime: input.runtime, sessionName: input.sessionName, nodeId: input.nodeId },
-        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
+        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore, dshRunnerStateStore: this.dshRunnerStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return { outcome: derived.outcome };
       const runtime = input.runtime as string; // non-null past exempt

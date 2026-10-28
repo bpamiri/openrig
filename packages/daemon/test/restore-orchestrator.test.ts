@@ -31,6 +31,7 @@ import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
+import type { DshResumeAdapter } from "../src/adapters/dsh-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -122,6 +123,7 @@ describe("RestoreOrchestrator", () => {
     codex?: CodexResumeAdapter;
     pi?: PiResumeAdapter;
     omp?: OmpResumeAdapter;
+    dsh?: DshResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     freshLaunch?: (rigId: string, nodeId: string) => Promise<{
       status: "launched" | "failed" | "attention_required";
@@ -138,6 +140,7 @@ describe("RestoreOrchestrator", () => {
       codexResume: opts?.codex ?? mockCodexResume(),
       piResume: opts?.pi,
       ompResume: opts?.omp,
+      dshResume: opts?.dsh,
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
     });
@@ -887,6 +890,33 @@ describe("RestoreOrchestrator", () => {
     (orch as any).codexResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(node.id, "pi-session", "pi_session_file", "/s.jsonl", "/work", null, "zai/glm", "floor", "high");
     expect(piResume).toHaveBeenCalledWith("pi-session", "pi_session_file", "/s.jsonl", "/work", "zai/glm", "floor", "high");
+  });
+
+  it("attemptResume hands dsh its session id and launch identity, and records the emitted permission mode", async () => {
+    const dshResume = vi.fn(async () => ({
+      ok: true as const,
+      appliedLaunch: { runtime: "dsh", axis: "permission" as const, state: "observed" as const, value: "workspace-write" },
+    }));
+    const orch = createOrchestrator({ dsh: { canResume: vi.fn(() => true), resume: dshResume } as unknown as DshResumeAdapter });
+    const rig = rigRepo.createRig("dsh-resume-test");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "dsh", cwd: "/work" });
+    (orch as any).claudeResume.canResume = vi.fn(() => false);
+    (orch as any).codexResume.canResume = vi.fn(() => false);
+    const result = await (orch as any).attemptResume(node.id, "dsh-session", "dsh_session_id", "session-abc", "/work", null, "deepseek/deepseek-chat", "floor");
+    expect(result).toEqual({ kind: "resumed" });
+    expect(dshResume).toHaveBeenCalledWith("dsh-session", "dsh_session_id", "session-abc", "/work", "deepseek/deepseek-chat", "floor",
+      { nodeId: node.id, launchGeneration: undefined });
+  });
+
+  it("attemptResume maps a dsh resume mismatch to retry_fresh, never a silent fresh seat", async () => {
+    const dshResume = vi.fn(async () => ({ ok: false as const, code: "retry_fresh" as const, message: "did not continue the requested session" }));
+    const orch = createOrchestrator({ dsh: { canResume: vi.fn(() => true), resume: dshResume } as unknown as DshResumeAdapter });
+    const rig = rigRepo.createRig("dsh-resume-mismatch-test");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "dsh", cwd: "/work" });
+    (orch as any).claudeResume.canResume = vi.fn(() => false);
+    (orch as any).codexResume.canResume = vi.fn(() => false);
+    await expect((orch as any).attemptResume(node.id, "dsh-session", "dsh_session_id", "session-abc", "/work", null, "floor"))
+      .resolves.toEqual({ kind: "retry_fresh" });
   });
 
   it("nonexistent snapshot -> { ok: false, code: 'snapshot_not_found' }", async () => {

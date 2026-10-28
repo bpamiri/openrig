@@ -131,9 +131,16 @@ export class RuntimeVerifier {
     return result;
   }
 
+  /** OPR.0.6.DSH1 — dsh is an independent executable with no Node engine check. */
+  async verifyDsh(): Promise<RuntimeVerification> {
+    const result = await this.verifyVersionOrHelp("dsh", "dsh");
+    this.persist(result);
+    return result;
+  }
+
   /**
    * Verify multiple runtimes. Returns results in input order.
-   * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex', 'pi', 'omp'
+   * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex', 'pi', 'omp', 'dsh'
    */
   async verifyAll(runtimes: string[]): Promise<RuntimeVerification[]> {
     const results: RuntimeVerification[] = [];
@@ -145,6 +152,7 @@ export class RuntimeVerifier {
         case "codex": results.push(await this.verifyCodex()); break;
         case "pi": results.push(await this.verifyPi()); break;
         case "omp": results.push(await this.verifyOmp()); break;
+        case "dsh": results.push(await this.verifyDsh()); break;
         default: {
           const v = this.buildVerification(runtime, "not_found", null, null, `unknown runtime: ${runtime}`);
           this.persist(v);

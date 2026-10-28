@@ -296,6 +296,56 @@ activityRoutes.post("/hooks", async (c) => {
       return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
+    // A dsh runner announces the ACP session id (`session-<uuid>`) it established. The token is id-shaped, so it takes
+    // the same strict path as OMP: the exact seat name, the seat's own runtime, the current occupant generation, and a
+    // session id that agrees with the runner's own sidecar. A refused post says tokenPersisted: false.
+    if (runtime === "dsh" || resolved.runtime === "dsh") {
+      if (sessionName !== resolved.sessionName) {
+        return c.json({ ok: false, code: "session_not_found", tokenPersisted: false, error: "Session identity does not match the managed seat." }, 404);
+      }
+      if (runtime !== resolved.runtime) {
+        return c.json({ ok: false, code: "runtime_mismatch", tokenPersisted: false, error: "Session identity runtime does not match the managed seat." }, 409);
+      }
+      const generation = stringOrNull(body.generation);
+      let reason: string | null = null;
+      try {
+        const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        if (!generation) reason = "generation_unverifiable";
+        else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
+          reason = "generation_unresolvable";
+        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+      } catch {
+        return c.json({
+          ok: false, code: "generation_resolver_error", tokenPersisted: false,
+          error: "dsh session identity ignored: occupant generation is unavailable.",
+        }, 503);
+      }
+      if (reason) {
+        return c.json({
+          ok: false, code: reason, tokenPersisted: false,
+          error: "dsh session identity ignored: emitter is not the registered current occupant.",
+        }, 409);
+      }
+      const validation = validateResumeToken("dsh", sessionId);
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const dsh = adapters?.["dsh"] as { readSessionId?: (sessionName: string) => { ok: true; sessionId: string } | { ok: false; reason: string } } | undefined;
+      const own = typeof dsh?.readSessionId === "function" ? dsh.readSessionId(resolved.sessionName) : null;
+      const tokenPersisted = validation.ok && own?.ok === true && own.sessionId === validation.token
+        ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
+        : false;
+      eventBus.emit({
+        type: "agent.session_identity",
+        rigId: resolved.rigId,
+        nodeId: resolved.nodeId,
+        sessionName: resolved.sessionName,
+        runtime: "dsh",
+        sessionId,
+        provenance: "rpc",
+      });
+      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
+    }
+
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
     // RPC get_state (provenance "rpc" on the bus, never scrape). The resume
     // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;

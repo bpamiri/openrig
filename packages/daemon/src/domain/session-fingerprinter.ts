@@ -31,6 +31,11 @@ function processNameIs(command: string, name: string): boolean {
 // state; a bare `omp` executable could use the default, unisolated user home.
 // No Layer-1 OMP signal: tmux reports the runner as `node`, never its argv.
 const OMP_READY_PATTERN = /^\s*\[omp-runner\] READY(?:\s|$)/;
+// Same reasoning as OMP: only the OpenRig-managed dsh runner's READY marker is
+// evidence of a dsh seat. dsh has no first-party TUI to fingerprint, tmux
+// reports the runner as `node`, and a bare `dsh` process is the ACP server
+// whose stdio is a JSON-RPC channel rather than a prompt.
+const DSH_READY_PATTERN = /^\s*\[dsh-runner\] READY(?:\s|$)/;
 
 const CLAUDE_PANE_PATTERNS = [
   { label: "Claude Code", test: (line: string) => /^\s*Claude Code\b/i.test(line) },
@@ -86,6 +91,7 @@ export class SessionFingerprinter {
         const hint = cmuxMatch.runtime.includes("claude") ? "claude-code" as RuntimeHint
           : cmuxMatch.runtime.includes("codex") ? "codex" as RuntimeHint
           : cmuxMatch.runtime.toLowerCase() === "omp" || cmuxMatch.runtime.toLowerCase() === "oh-my-pi" ? "omp" as RuntimeHint
+          : cmuxMatch.runtime.toLowerCase() === "dsh" ? "dsh" as RuntimeHint
           : "unknown" as RuntimeHint;
         return { runtimeHint: hint, confidence: "highest", evidence };
       }
@@ -148,6 +154,11 @@ export class SessionFingerprinter {
           evidence.layerUsed = 2;
           evidence.paneContentSignal = { pattern: "[omp-runner] READY", matchedLine: line.trim() };
           return { runtimeHint: "omp", confidence: "medium", evidence };
+        }
+        if (DSH_READY_PATTERN.test(line)) {
+          evidence.layerUsed = 2;
+          evidence.paneContentSignal = { pattern: "[dsh-runner] READY", matchedLine: line.trim() };
+          return { runtimeHint: "dsh", confidence: "medium", evidence };
         }
       }
     }

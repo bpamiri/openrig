@@ -20,6 +20,9 @@ function mapRuntime(hint: RuntimeHint): string {
   switch (hint) {
     case "claude-code": return "claude-code";
     case "codex": return "codex";
+    case "pi": return "pi";
+    case "omp": return "omp";
+    case "dsh": return "dsh";
     case "terminal": return "terminal";
     default: return "claude-code"; // unreachable — unknowns excluded before this
   }
