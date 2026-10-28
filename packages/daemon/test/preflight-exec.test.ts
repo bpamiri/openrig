@@ -4,9 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { runtimeProbeFailure, runtimeVersionProbeCwd } from "../src/adapters/preflight-exec.js";
-import { verifyOmpRuntimeAvailable, verifyPiRuntimeAvailable } from "../src/domain/rigspec-preflight.js";
-import { ProbeTimeoutError, RUNTIME_PROBE_TIMEOUT_MS } from "../src/adapters/bounded-probe-exec.js";
+import { runPreflightCommand, runtimeProbeFailure, runtimeVersionProbeCwd } from "../src/adapters/preflight-exec.js";
+import { verifyDshRuntimeAvailable, verifyOmpRuntimeAvailable, verifyPiRuntimeAvailable } from "../src/domain/rigspec-preflight.js";
+import { boundedProbeExec, ProbeTimeoutError, RUNTIME_PROBE_TIMEOUT_MS } from "../src/adapters/bounded-probe-exec.js";
+import { stopGroup } from "../src/domain/codex-network-default.js";
 import type { RigSpec } from "../src/domain/types.js";
 
 const roots: string[] = [];
@@ -22,7 +23,7 @@ function probe(mode: string, runtime = "pi") {
     'name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n');
   // Mirrors the relevant Pi startup behaviour: getcwd before handling --version.
   // No real runtime, session or provider is invoked.
-  for (const name of ["pi", "omp", "codex"]) {
+  for (const name of ["pi", "omp", "codex", "dsh"]) {
     fs.writeFileSync(path.join(root, "bin", name),
       `#!${process.execPath}\nconsole.log(process.cwd());\n`, { mode: 0o700 });
   }
@@ -84,7 +85,7 @@ describe("runtime version preflight cwd", () => {
     expect(warnings).toEqual(["`pi --version` didn't answer within 30 s"]);
   });
 
-  it.each(["pi", "omp", "codex", "claude"])("preserves a healthy cwd for %s --version", (runtime) => {
+  it.each(["pi", "omp", "codex", "claude", "dsh"])("preserves a healthy cwd for %s --version", (runtime) => {
     const cwd = runtimeVersionProbeCwd(`${runtime} --version`);
     expect(cwd).toBe(process.cwd());
     expect(fs.statSync(cwd!).isDirectory()).toBe(true);
@@ -110,7 +111,7 @@ describe("runtime version preflight cwd", () => {
     expect(result.generic).toBe(result.nonVersion);
   });
 
-  it.skipIf(process.platform === "win32").each(["pi", "omp"])("survives a deleted daemon cwd for %s through all preflight paths", (runtime) => {
+  it.skipIf(process.platform === "win32").each(["pi", "omp", "dsh"])("survives a deleted daemon cwd for %s through all preflight paths", (runtime) => {
     const result = probe("deleted", runtime);
     expect(result.core).toMatchObject({ ready: true, errors: [] });
     expect(result.route).toMatchObject({ ready: true, errors: [] });
@@ -118,7 +119,7 @@ describe("runtime version preflight cwd", () => {
     expect(result.bootstrap).toMatchObject({ status: 200, result: { status: "planned", errors: [] } });
   });
 
-  it.skipIf(process.platform === "win32").each(["pi", "omp"])("keeps relative PATH lookup in a healthy cwd for %s", (runtime) => {
+  it.skipIf(process.platform === "win32").each(["pi", "omp", "dsh"])("keeps relative PATH lookup in a healthy cwd for %s", (runtime) => {
     const result = probe("relative", runtime);
     expect(fs.realpathSync(result.generic)).toBe(fs.realpathSync(result.work));
     expect(result.core).toMatchObject({ ready: true, errors: [] });
@@ -127,7 +128,7 @@ describe("runtime version preflight cwd", () => {
     expect(result.bootstrap).toMatchObject({ status: 200, result: { status: "planned", errors: [] } });
   });
 
-  it.skipIf(process.platform === "win32").each(["pi", "omp"])("does not trust a cached cwd after deletion for %s", (runtime) => {
+  it.skipIf(process.platform === "win32").each(["pi", "omp", "dsh"])("does not trust a cached cwd after deletion for %s", (runtime) => {
     const result = probe("deleted-cached", runtime);
     expect(result.core).toMatchObject({ ready: true, errors: [] });
     expect(result.route).toMatchObject({ ready: true, errors: [] });
@@ -153,6 +154,49 @@ describe("runtime version preflight cwd", () => {
       expect(value.errors.join("\n")).toContain("executable not found on PATH");
     }
     expect(result.bootstrap).toMatchObject({ status: 409, result: { status: "failed" } });
+  });
+
+  it.skipIf(process.platform === "win32")("reports an absent dsh through the bounded production path as not on PATH", () => {
+    const result = probe("missing", "dsh");
+    for (const value of [result.core, result.route, result.legacy]) {
+      expect(value.ready).toBe(false);
+      expect(value.errors.join("\n")).toContain("executable not found on PATH");
+    }
+    expect(result.bootstrap).toMatchObject({ status: 409, result: { status: "failed" } });
+  });
+
+  it("names the check and the limit for a dsh version check that hit it, without 'not available' or the install hint", async () => {
+    const exec = vi.fn().mockRejectedValue(new ProbeTimeoutError("dsh --version", RUNTIME_PROBE_TIMEOUT_MS));
+    const spec = { pods: [{ members: [{ runtime: "dsh" }] }] } as RigSpec;
+    expect(await verifyDshRuntimeAvailable(spec, exec)).toEqual(["`dsh --version` didn't answer within 30 s"]);
+  });
+
+  it.skipIf(process.platform === "win32")("routes dsh --version through the bounded probe and ends its process group", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsh-version-probe-"));
+    roots.push(root);
+    const bin = path.join(root, "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "dsh"), `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+    const endGroup = vi.fn(stopGroup);
+    try {
+      const routed = runPreflightCommand("dsh --version", boundedProbeExec(300, 100, { stopGroup: endGroup }));
+      await expect(routed).rejects.toBeInstanceOf(ProbeTimeoutError);
+      expect(endGroup).toHaveBeenCalledTimes(1);
+      // A non-version command never enters the bounded runtime probe.
+      const passthrough = vi.fn(async () => "passthrough");
+      await expect(runPreflightCommand("echo hello", passthrough)).resolves.toBe("hello\n");
+      expect(passthrough).not.toHaveBeenCalled();
+    } finally {
+      process.env.PATH = previousPath;
+    }
+  });
+
+  it("recognises an absent dsh in the version-failure classifier", () => {
+    expect(runtimeProbeFailure({ status: 127, stderr: Buffer.from("sh: dsh: not found") })).toBe("exit status 127; executable not found on PATH");
+    expect(runtimeVersionProbeCwd("dsh --version")).toBeDefined();
+    expect(runtimeVersionProbeCwd("dsh --help")).toBeUndefined();
   });
 
   it("distinguishes cwd lookup failure without echoing arbitrary process output", async () => {

@@ -8,7 +8,7 @@ import { execCommand } from "./tmux-exec.js";
  * only when the daemon's inherited cwd is unavailable. Profile/config probes
  * and all other commands keep their existing context. */
 export function runtimeVersionProbeCwd(cmd: string): string | undefined {
-  if (!/^(pi|omp|codex|claude) --version$/.test(cmd)) return undefined;
+  if (!/^(pi|omp|codex|claude|dsh) --version$/.test(cmd)) return undefined;
   try {
     const cwd = process.cwd();
     // Node can cache cwd even after the directory has been removed.
@@ -21,11 +21,17 @@ export function runtimeVersionProbeCwd(cmd: string): string | undefined {
  *  runtime binary otherwise holds a rig launch (or the daemon's startup) indefinitely and outlives the daemon. */
 const versionProbe = boundedProbeExec(undefined, undefined, { cwd: runtimeVersionProbeCwd });
 
-/** Production preflight only; callers still prefer an explicitly injected exec. */
-export const execPreflightCommand: ExecFn = async (cmd) => {
+/** Route one preflight command: a recognised runtime version probe goes through
+ *  the bounded probe (timeout + process-group end), everything else keeps the
+ *  ordinary command semantics. Exported so the production routing can be proven
+ *  with a short-bounded probe in tests; production passes the default `versionProbe`. */
+export function runPreflightCommand(cmd: string, probe: ExecFn = versionProbe): Promise<string> {
   if (runtimeVersionProbeCwd(cmd) === undefined) return execCommand(cmd);
-  return versionProbe(cmd);
-};
+  return probe(cmd);
+}
+
+/** Production preflight only; callers still prefer an explicitly injected exec. */
+export const execPreflightCommand: ExecFn = (cmd) => runPreflightCommand(cmd);
 
 /** The message for a version check that hit its time limit: the check and the limit, nothing from the runtime.
  *  Undefined for any other failure. */
@@ -48,6 +54,6 @@ export function runtimeProbeFailure(err: unknown): string {
   const stderr = Buffer.isBuffer(failure.stderr) ? failure.stderr.toString() : failure.stderr;
   const diagnostic = [stderr, failure.message].filter((value) => typeof value === "string").join("\n");
   if (/\b(?:uv_cwd|getcwd)\b/.test(diagnostic)) detail.push("working-directory lookup failed");
-  else if (/(?:command not found|: (?:pi|omp|codex|claude): not found)/.test(diagnostic)) detail.push("executable not found on PATH");
+  else if (/(?:command not found|: (?:pi|omp|codex|claude|dsh): not found)/.test(diagnostic)) detail.push("executable not found on PATH");
   return detail.join("; ") || "execution failed";
 }

@@ -522,6 +522,8 @@ export async function verifyDshRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     await exec(RUNTIME_COMMANDS["dsh"]!);
     return [];
   } catch (err) {
+    const timedOut = runtimeProbeTimeout(err);
+    if (timedOut) return [timedOut];
     return [`Runtime "dsh" not available ('dsh --version' failed: ${runtimeProbeFailure(err)}). If the DeepSeek Harness is not installed, install @deepseek-ai/dsh and ensure 'dsh' is on PATH.`];
   }
 }
