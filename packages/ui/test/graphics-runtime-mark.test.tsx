@@ -43,6 +43,12 @@ describe("graphics runtime package", () => {
     expect(screen.getByRole("img", { name: "Claude" })).toBeTruthy();
   });
 
+  it("renders the DeepSeek Harness badge with the DSH short label and named mark", () => {
+    render(<RuntimeBadge runtime="dsh" compact />);
+    expect(screen.getByText("DSH")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "DeepSeek Harness" })).toBeTruthy();
+  });
+
   it("keeps standalone runtime marks named for icon-only use", () => {
     render(<RuntimeMark runtime="claude-code" />);
     expect(screen.getByRole("img", { name: "Claude" })).toBeTruthy();

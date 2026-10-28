@@ -892,7 +892,7 @@ describe("RestoreOrchestrator", () => {
     expect(piResume).toHaveBeenCalledWith("pi-session", "pi_session_file", "/s.jsonl", "/work", "zai/glm", "floor", "high");
   });
 
-  it("attemptResume hands dsh its session id and launch identity, and records the emitted permission mode", async () => {
+  it("attemptResume hands dsh its session id and launch identity, and records the permission mode for the occupant generation", async () => {
     const dshResume = vi.fn(async () => ({
       ok: true as const,
       appliedLaunch: { runtime: "dsh", axis: "permission" as const, state: "observed" as const, value: "workspace-write" },
@@ -900,12 +900,19 @@ describe("RestoreOrchestrator", () => {
     const orch = createOrchestrator({ dsh: { canResume: vi.fn(() => true), resume: dshResume } as unknown as DshResumeAdapter });
     const rig = rigRepo.createRig("dsh-resume-test");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "dsh", cwd: "/work" });
+    const claimed = sessionRegistry.registerClaimedSession(node.id, "dsh-session");
+    const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     (orch as any).codexResume.canResume = vi.fn(() => false);
     const result = await (orch as any).attemptResume(node.id, "dsh-session", "dsh_session_id", "session-abc", "/work", null, "deepseek/deepseek-chat", "floor");
     expect(result).toEqual({ kind: "resumed" });
+    expect(claimed.nodeId).toBe(node.id);
     expect(dshResume).toHaveBeenCalledWith("dsh-session", "dsh_session_id", "session-abc", "/work", "deepseek/deepseek-chat", "floor",
-      { nodeId: node.id, launchGeneration: undefined });
+      { nodeId: node.id, launchGeneration: generation, effort: undefined });
+    // The appliedLaunch was actually recorded for the current occupant.
+    expect(new AppliedLaunchObservationStore(db).readCurrent(node.id)).toMatchObject({
+      runtime: "dsh", axis: "permission", state: "observed", value: "workspace-write",
+    });
   });
 
   it("attemptResume maps a dsh resume mismatch to retry_fresh, never a silent fresh seat", async () => {
