@@ -370,7 +370,7 @@ Hono HTTP daemon
 - **CLI**: Commands for both humans and agents to launch teams, inspect state, send messages, track owned work, and manage context.
 - **TUI**: Topology explorer, table and graph views, seat details, Specs, Projects, Terminals, Feed, and System. Navigate with the keyboard, mouse, or command bar.
 - **MCP**: Tools so agents can manage their own topology (`rig_up`, `rig_ps`, `rig_send`, `rig_chatroom_send`, etc.)
-- **Runtimes**: Native Claude Code and Codex sessions, terminal nodes, and Pi and Oh My Pi via RPC runners.
+- **Runtimes**: Native Claude Code and Codex sessions, terminal nodes, and Pi, Oh My Pi and the DeepSeek Harness (`dsh`) via OpenRig-owned runners in the seat pane.
 
 ## Terminal UI and Workspaces
 

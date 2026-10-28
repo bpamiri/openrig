@@ -242,6 +242,7 @@ Runtime marks:
 - Codex: Codex CLI terminal-circle mark, label `Codex`
 - Pi: blue rounded-square π mark, label `Pi`
 - Oh My Pi: violet rounded-square π mark, label `Oh My Pi` (short label `OMP`)
+- DeepSeek Harness: teal rounded-square whale mark, label `DeepSeek Harness` (short label `DSH`)
 - Terminal: compact terminal glyph, label `TTY` or `Terminal`
 - Unknown: neutral fallback
 

@@ -47,11 +47,11 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 | `app.route(...)` mounts in `server.ts` | **69** | `grep -c 'app.route(' packages/daemon/src/server.ts` |
 | Top-level `rig` commands | **87** | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
 | MCP tools | **18**, all named `rig_*` | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
-| Runtime adapter classes | **5**: Claude Code, Codex, Pi, Stub, Terminal | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
+| Runtime adapter classes | **6**: Claude Code, Codex, Pi, DeepSeek Harness, Stub, Terminal | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
 
 `OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
-six runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
-(`startup.ts:989`).
+seven runtime keys — `claude-code`, `codex`, `pi`, `omp`, `dsh`, `stub`, `terminal`
+(`startup.ts`).
 
 ### The stack
 

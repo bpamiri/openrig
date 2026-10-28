@@ -117,11 +117,12 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   window in production — never by fixture pass alone (symmetric admission: a fixture
   pass admits a rung to TRIAL, where it is measured but not consulted; production agreement
   promotes it). Undeclared and partial-coverage rungs are identity-only, which is also where
-  a degraded rung goes, with one declared exception: for a pi or omp seat or a community
+  a degraded rung goes, with one declared exception: for a pi, omp or dsh seat or a community
   harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
   own, since the pane can be quiet mid-turn.
-- **pi and omp runner hooks**: OpenRig's runner reads the child's RPC event stream and posts
-  each turn boundary (`agent_start`, `turn_start`, tool calls, `agent_end`; attention). These
+- **pi, omp and dsh runner hooks**: OpenRig's runner reads the child's RPC or ACP event stream and
+  posts each turn boundary (`agent_start`, `turn_start`, tool calls, `agent_end`; attention). dsh
+  posts its turn start and end plus a refused-escalation notice the same way. These
   decide working, idle and needs-input. Unlike Claude and Codex hooks, an idle or attention
   boundary holds until the next one instead of expiring after 15 s; a working boundary still
   expires, so a turn whose end was lost reads unknown, not working forever. Posts are taken
@@ -136,8 +137,9 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   A pi runner also posts an idle `Stop` (`idle_heartbeat`) every three minutes while it waits, and states that
   interval as `livenessSeconds` on every `Stop`: a newly ready runner reads idle at once, and an idle boundary that
   carries an interval holds for two of them, then lapses to unknown, so a runner killed without saying so stops reading
-  idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, an older pi
-  runner) keeps the hold-until-the-next-boundary behaviour.
+  idle. Silence never clears a pending attention prompt, and a runner that states no interval (omp, dsh, an older pi
+  runner) keeps the hold-until-the-next-boundary behaviour. dsh records its child's exit in the runner sidecar, which
+  readiness reads, rather than posting a process-exit hook.
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
 trust, unless its inventory declares it positive-only. A positive-only source can report

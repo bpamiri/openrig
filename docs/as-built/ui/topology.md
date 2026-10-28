@@ -130,7 +130,7 @@ hot-potato edges, and `activity-visuals.ts` the rollups and activity dots.
 Runtime/tool identity on the cards comes from the central
 `lib/runtime-brand.ts` / `lib/tool-brand.ts` and
 `components/graphics/RuntimeMark.tsx` (runtimes: Claude Code, Codex, Pi,
-OMP, terminal, unknown). Do not duplicate brand logic (DESIGN.md "Do
+OMP, dsh, terminal, unknown). Do not duplicate brand logic (DESIGN.md "Do
 not").
 
 ## See also

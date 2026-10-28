@@ -55,7 +55,7 @@ and fails the build on a specifier with no `exports` entry. To share new daemon 
   packages/daemon/src/domain/        services, repositories, orchestrators, event bus
               /                 |                  \
      SQLite (db/)       tmux (adapters/tmux.ts)    runtime adapters (adapters/*-adapter.ts)
-                                                     claude-code, codex, pi, omp, terminal, stub
+                                                     claude-code, codex, pi, omp, dsh, terminal, stub
 ```
 
 **Inside the daemon** (`packages/daemon/src/`):
@@ -122,7 +122,7 @@ At commit `c750304f`. Run these from the repository root to refresh them.
 | ... of which create a Hono router | 65 | `git grep -l 'new Hono' -- packages/daemon/src/routes \| wc -l` |
 | `app.route(...)` mounts in `server.ts` | 69 | `grep -c 'app.route(' packages/daemon/src/server.ts` |
 | Top-level `rig` commands | 87 | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
-| Runtime adapters | 6 (`claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`); the command counts 5 because `OmpRuntimeAdapter` extends `PiRuntimeAdapter` | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
+| Runtime adapters | 7 (`claude-code`, `codex`, `pi`, `omp`, `dsh`, `terminal`, `stub`); the command counts 6 because `OmpRuntimeAdapter` extends `PiRuntimeAdapter` | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
 | MCP tools | 18 | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
 | Daemon `exports` subpaths | 21 | `node -p 'Object.keys(require("./packages/daemon/package.json").exports).length'` |
 | Library scenarios | 15 | `grep -l '^scenario:' packages/test-system/scenarios/*.yaml \| wc -l` |

@@ -1,12 +1,12 @@
 ---
 kind: as-built
-title: Adapters and Runtimes — Claude/Codex/Pi/Stub/Terminal, tmux/cmux, Resume Honesty
+title: Adapters and Runtimes — Claude/Codex/Pi/OMP/DSH/Stub/Terminal, tmux/cmux, Resume Honesty
 status: active
 topics: [agent-runtime, runtime-control]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Need the runtime-adapter contract — how OpenRig launches and resumes a
-  Claude Code, Codex, Pi, Oh My Pi, stub or terminal harness inside tmux, what
+  Claude Code, Codex, Pi, Oh My Pi, DeepSeek Harness, stub or terminal harness inside tmux, what
   the five required adapter methods do, or how the daemon honestly assesses
   whether a harness actually resumed vs fresh-launched (the resume-honesty
   layer).
@@ -19,11 +19,11 @@ last-updated: 2026-10-08
 # Adapters and Runtimes
 
 How OpenRig drives the agent harnesses. Pod-aware launches go through a
-`RuntimeAdapter`: five adapter classes implement one contract of five required
+`RuntimeAdapter`: six adapter classes implement one contract of five required
 methods. Legacy (non-pod-aware) restore resumes through separate resume
-adapters (`ClaudeResumeAdapter`, `CodexResumeAdapter`, `PiResumeAdapter` and
-`OmpResumeAdapter` in `packages/daemon/src/adapters/*-resume.ts`), which are not
-`RuntimeAdapter`s. A separate resume-honesty layer answers the question "did
+adapters (`ClaudeResumeAdapter`, `CodexResumeAdapter`, `PiResumeAdapter`,
+`OmpResumeAdapter` and `DshResumeAdapter` in
+`packages/daemon/src/adapters/*-resume.ts`), which are not `RuntimeAdapter`s. A separate resume-honesty layer answers the question "did
 this harness *actually* resume, or did it silently fresh-launch?" truthfully
 rather than optimistically.
 
@@ -123,16 +123,17 @@ login-refusal UI, and its scenario runner does not bind the restore action.
 
 ## 2. The runtime adapters
 
-**5** classes implement `RuntimeAdapter`
+**6** classes implement `RuntimeAdapter`
 (`git grep -l 'implements RuntimeAdapter' packages/daemon/src | wc -l`):
 `ClaudeCodeAdapter`, `CodexRuntimeAdapter`, `PiRuntimeAdapter`,
-`StubRuntimeAdapter` and `TerminalAdapter`. All live under
+`DshRuntimeAdapter`, `StubRuntimeAdapter` and `TerminalAdapter`. All live under
 `packages/daemon/src/adapters/` (Architecture Rule 1: **0** files there import
 Hono, `git grep -l 'from "hono' -- packages/daemon/src/adapters | wc -l`).
 `OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
-**6** runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
-(`startup.ts:989`, and the same map at `:1259`;
-`grep 'adapters: {' packages/daemon/src/startup.ts | grep -o -E '"[a-z-]+": ' | wc -l`).
+**7** runtime keys — `claude-code`, `codex`, `pi`, `omp`, `dsh`, `stub`,
+`terminal` (the two startup maps, `PodRigInstantiator`'s `adapters` and the
+relaunch/restore `runtimeAdapters` map; both are wrapped by
+`withCommunityHarnesses`/`withCommunityHarnessResolver`).
 
 ### Launch posture
 
@@ -354,7 +355,7 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
   clear error (`:38–42`), as the runtime-adapter docstring requires of
   adapters without fork (`runtime-adapter.ts:129–130`).
 
-### Pi, Oh My Pi and stub adapters
+### Pi, Oh My Pi, DeepSeek Harness and stub adapters
 
 - `PiRuntimeAdapter` (`pi-runtime-adapter.ts:64`), `runtime` `"pi"` (`:65`).
 - `OmpRuntimeAdapter` (`omp-runtime-adapter.ts:7`) extends it with
@@ -362,10 +363,17 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
 - `StubRuntimeAdapter` (`stub-runtime-adapter.ts:69`), `runtime` defaulting to
   `"stub"` (`:81`).
 
-Pi and stub launch an OpenRig runner inside the seat's tmux pane (header
-comments `pi-runtime-adapter.ts:1–10`, `stub-runtime-adapter.ts:1–14`). Pi
-and Oh My Pi support fork and report `pi_session_file` or `omp_session_file`
-resume tokens; the stub refuses fork and reports `stub_session`.
+Pi, Oh My Pi, DeepSeek Harness and stub launch an OpenRig-owned runner inside
+the seat's tmux pane (header comments `pi-runtime-adapter.ts:1–10`,
+`dsh-runtime-adapter.ts:1–8`, `stub-runtime-adapter.ts:1–14`). Pi and Oh My Pi
+support fork and report `pi_session_file` or `omp_session_file` resume tokens;
+the stub refuses fork and reports `stub_session`. `DshRuntimeAdapter`
+(`dsh-runtime-adapter.ts:79`) hosts `dsh --profile acp` over ACP v1 on stdio,
+reports an id-shaped `dsh_session_id` token, refuses fork (dsh's ACP profile
+exposes none), and returns the `DSH_PERMISSION_MODE` it emitted as its
+`appliedLaunch` observation. Its resume leg (`dsh-resume.ts`) types the same
+runner command and reports resumed only when the launch-scoped sidecar comes
+back ready on the exact requested session id.
 
 `createDaemon` constructs the adapters (`startup.ts:778`, `:779`, `:782`,
 `:783`, `:788`) and creates the terminal adapter inline in the runtime adapter
@@ -507,6 +515,6 @@ module.
   snapshot/restore (resume vs rebuild vs fresh).
 - `architecture-rules-and-event-system.md` — the full architecture rule list.
 - Source roots: `packages/daemon/src/domain/runtime-adapter.ts`,
-  `packages/daemon/src/adapters/{claude-code-adapter,codex-runtime-adapter,pi-runtime-adapter,omp-runtime-adapter,stub-runtime-adapter,terminal-adapter,yolo-mode,non-interruptive,kernel-authority}.ts`,
+  `packages/daemon/src/adapters/{claude-code-adapter,codex-runtime-adapter,pi-runtime-adapter,omp-runtime-adapter,dsh-runtime-adapter,dsh-runner,dsh-runner-protocol,dsh-resume,stub-runtime-adapter,terminal-adapter,yolo-mode,non-interruptive,kernel-authority}.ts`,
   `packages/daemon/src/domain/{native-resume-probe,resume-metadata-refresher,codex-thread-id,claude-managed-launch,codex-network-default,native-permission-store}.ts`,
   `packages/daemon/src/domain/permission-policy/policy-ref.ts`.

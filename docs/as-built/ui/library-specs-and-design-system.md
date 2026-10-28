@@ -102,8 +102,9 @@ These daemon-backed flows feed the Library UI:
   `RuntimeBadge`, `ToolMark`, `ToolBadge`, `ActorMark`,
   `OperatorMoodMark`; normalization in `lib/runtime-brand.ts` +
   `lib/tool-brand.ts`. Runtime brands are Claude Code, Codex, Pi ("Pi"),
-  OMP ("Oh My Pi", short "OMP"), terminal and unknown; `ActorMark` reuses
-  the runtime marks for recognized runtimes.
+  OMP ("Oh My Pi", short "OMP"), dsh (DeepSeek Harness, short "DSH"),
+  terminal and unknown; `ActorMark` reuses the runtime marks for recognized
+  runtimes.
 - **Project metadata** (`components/project/ProjectMetaPrimitives.tsx`):
   `ProjectPill` (`:199`), `EventBadge` (`:227`), `QueueStateBadge` (`:231`),
   `TagPill` (`:277`), `ActorChip` (`:286`), `DateChip` (`:306`),

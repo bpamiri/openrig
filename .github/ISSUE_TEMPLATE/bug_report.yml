@@ -33,6 +33,7 @@ body:
         - Claude Code
         - Codex
         - Pi / Oh My Pi
+        - DeepSeek Harness (dsh)
         - Other (say which below)
     validations:
       required: true
