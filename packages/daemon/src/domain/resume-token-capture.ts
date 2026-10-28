@@ -38,6 +38,11 @@ export interface ResumeTokenCaptureDeps {
   ompRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   } | null;
+  /** Reads the dsh runner's sidecar. A dsh token is the ACP SESSION ID dsh
+   *  reported, not a file: dsh has no session-file handle to disclose. */
+  dshRunnerStateStore?: {
+    readSessionId(sessionName: string): { ok: true; sessionId: string } | { ok: false; reason: string };
+  } | null;
 }
 
 export type ResumeTokenDeriveResult =
@@ -122,6 +127,15 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
     }
     if (state.sessionFile.trim().length > 0) token = state.sessionFile.trim();
+    else return { outcome: "skipped", reason: "missing_sidecar" };
+  } else if (runtime === "dsh") {
+    const stateStore = deps.dshRunnerStateStore;
+    if (!stateStore) return { outcome: "noop" }; // dep absent — silent no-op
+    const state = stateStore.readSessionId(input.sessionName);
+    if (!state.ok) {
+      return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    }
+    if (state.sessionId.trim().length > 0) token = state.sessionId.trim();
     else return { outcome: "skipped", reason: "missing_sidecar" };
   } else {
     return { outcome: "noop" }; // resumeType set but runtime is not one we derive — defensive

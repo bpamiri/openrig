@@ -1,6 +1,9 @@
 // OPR.0.4.0.22 FR-2 — per-runtime resume-token validation.
 // File-shaped Pi and OMP tokens share the same format floor; id-shaped
-// Claude/Codex tokens retain their original rules unchanged.
+// Claude/Codex tokens retain their original rules unchanged. dsh is id-shaped
+// too: its ACP session id is `session-<uuid>`, never a path — dsh reports the
+// id and never discloses a session file, so a path-shaped token would be a
+// shape nothing can produce.
 //
 // The floor is FORMAT validation: reject malformed input, never fabricate a
 // token, and NEVER quote the raw token in an error message (it is
@@ -9,7 +12,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file" | "dsh_session_id";
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -48,6 +51,7 @@ export function resumeTypeForRuntime(runtime: string | null): ResumeType | null 
   if (runtime === "codex") return "codex_id";
   if (runtime === "pi") return "pi_session_file";
   if (runtime === "omp") return "omp_session_file";
+  if (runtime === "dsh") return "dsh_session_id";
   return null;
 }
 
@@ -95,7 +99,7 @@ export function validateResumeToken(
   if (!resumeType) {
     return {
       ok: false,
-      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, and omp have resume tokens).`,
+      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, omp, and dsh have resume tokens).`,
     };
   }
   if (typeof rawToken !== "string") {

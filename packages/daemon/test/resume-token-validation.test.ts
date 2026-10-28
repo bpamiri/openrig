@@ -10,6 +10,9 @@ describe("resumeTypeForRuntime", () => {
     expect(resumeTypeForRuntime("claude-code")).toBe("claude_id");
     expect(resumeTypeForRuntime("codex")).toBe("codex_id");
     expect(resumeTypeForRuntime("pi")).toBe("pi_session_file");
+    expect(resumeTypeForRuntime("omp")).toBe("omp_session_file");
+    // dsh reports an ACP session id, never a session file path.
+    expect(resumeTypeForRuntime("dsh")).toBe("dsh_session_id");
     expect(resumeTypeForRuntime("terminal")).toBeNull();
     expect(resumeTypeForRuntime(null)).toBeNull();
   });

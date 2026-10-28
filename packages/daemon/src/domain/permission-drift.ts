@@ -103,6 +103,16 @@ export function observePiResourceTrust(trust: "approve" | "no-approve"): Applied
   return { runtime: "pi", axis: "resource_trust", state: "observed", value: trust };
 }
 
+/** dsh bundles its sandbox and approval choice into DSH_PERMISSION_MODE, emitted
+ *  from the resolved posture; the two values are the whole vocabulary dsh accepts. */
+export function observeDshPermissionMode(mode: string | null | undefined): AppliedLaunchObservation {
+  const normalized = (mode ?? "").trim();
+  if (normalized === "workspace-write" || normalized === "danger-full-access") {
+    return { runtime: "dsh", axis: "permission", state: "observed", value: normalized };
+  }
+  return { runtime: "dsh", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument" };
+}
+
 export function observeOmpApprovalMode(arg: string): AppliedLaunchObservation {
   const mode = arg.trim().replace(/\s+/g, " ");
   if (mode === "--approval-mode yolo") {
@@ -119,6 +129,7 @@ function runtimeCommand(runtime: string): string | null {
   if (runtime === "codex") return "codex";
   if (runtime === "pi") return "pi";
   if (runtime === "omp") return "omp";
+  if (runtime === "dsh") return "dsh";
   return null;
 }
 
@@ -240,7 +251,8 @@ function inspectLaunchBoundRuntime(
   runtime: string,
   applied: AppliedLaunchObservation | null,
 ): RuntimeEnforcementDiagnostic {
-  const axis: AppliedLaunchAxis = runtime === "codex" ? "sandbox" : runtime === "pi" ? "resource_trust" : runtime === "omp" ? "permission" : "not_applicable";
+  const axis: AppliedLaunchAxis = runtime === "codex" ? "sandbox" : runtime === "pi" ? "resource_trust"
+    : runtime === "omp" || runtime === "dsh" ? "permission" : "not_applicable";
   if (!applied || applied.runtime !== runtime || applied.axis !== axis || applied.state !== "observed" || !applied.value) {
     return unknownEnforcement(axis, null, null, applied?.reason ?? "applied_launch_unknown");
   }

@@ -3,6 +3,7 @@ import {
   diagnoseRuntimePosture,
   observeClaudePermission,
   observeCodexSandbox,
+  observeDshPermissionMode,
   observePiResourceTrust,
   parseClaudePermissionModes,
   renderPermissionDriftSummary,
@@ -52,6 +53,32 @@ describe("applied launch observations retain the emitted argument value", () => 
     const observation = observePiResourceTrust("approve");
     expect(observation).toEqual({ runtime: "pi", axis: "resource_trust", state: "observed", value: "approve" });
     expect(JSON.stringify(observation)).not.toMatch(/permission/i);
+  });
+
+  it("preserves dsh's DSH_PERMISSION_MODE vocabulary and refuses anything else", () => {
+    expect(observeDshPermissionMode("workspace-write")).toEqual({
+      runtime: "dsh", axis: "permission", state: "observed", value: "workspace-write",
+    });
+    expect(observeDshPermissionMode("danger-full-access")).toMatchObject({ state: "observed", value: "danger-full-access" });
+    expect(observeDshPermissionMode(undefined)).toEqual({
+      runtime: "dsh", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument",
+    });
+  });
+});
+
+describe("dsh permission drift reads the runner's emitted mode", () => {
+  it("reports the dsh binary on PATH and the generation-matched launch effect", () => {
+    const diagnostic = diagnoseRuntimePosture({
+      runtime: "dsh",
+      cwd,
+      applied: observeDshPermissionMode("danger-full-access"),
+      fs: fsFixture({}, true),
+    });
+    expect(diagnostic.commandPath).toEqual({ state: "available" });
+    expect(diagnostic.enforcement).toMatchObject({
+      axis: "permission", state: "aligned", expected: "danger-full-access", effective: "danger-full-access",
+      reason: "generation_matched_launch_effect",
+    });
   });
 });
 
