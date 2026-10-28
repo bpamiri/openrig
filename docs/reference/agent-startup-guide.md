@@ -562,6 +562,11 @@ remain shared.
 - Selected skills are projected into the seat's own agent directory under OpenRig's state, not into a shared
   workspace folder
 
+**DeepSeek Harness (dsh):**
+- Reads `AGENTS.md` in the working directory; guidance is merged there
+- Selected skills are projected into `<cwd>/.dsh/skills/<id>`, which dsh hot-watches — a project-scoped folder,
+  not OpenRig's seat state
+
 **Terminal seats** (`builtin:terminal`) get no agent or profile layers and no startup proof.
 
 ### Claude compaction preparation directory

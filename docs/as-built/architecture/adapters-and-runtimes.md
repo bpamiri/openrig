@@ -123,16 +123,17 @@ login-refusal UI, and its scenario runner does not bind the restore action.
 
 ## 2. The runtime adapters
 
-**6** classes implement `RuntimeAdapter`
-(`git grep -l 'implements RuntimeAdapter' packages/daemon/src | wc -l`):
-`ClaudeCodeAdapter`, `CodexRuntimeAdapter`, `PiRuntimeAdapter`,
-`DshRuntimeAdapter`, `StubRuntimeAdapter` and `TerminalAdapter`. All live under
-`packages/daemon/src/adapters/` (Architecture Rule 1: **0** files there import
-Hono, `git grep -l 'from "hono' -- packages/daemon/src/adapters | wc -l`).
-`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
-**7** runtime keys — `claude-code`, `codex`, `pi`, `omp`, `dsh`, `stub`,
-`terminal` (the two startup maps, `PodRigInstantiator`'s `adapters` and the
-relaunch/restore `runtimeAdapters` map; both are wrapped by
+**7** files implement `RuntimeAdapter`
+(`git grep -l 'implements RuntimeAdapter' packages/daemon/src | wc -l`): the six
+built-in classes `ClaudeCodeAdapter`, `CodexRuntimeAdapter`,
+`PiRuntimeAdapter`, `DshRuntimeAdapter`, `StubRuntimeAdapter` and
+`TerminalAdapter`, plus `CommunityHarnessRuntimeAdapter` for preset harnesses.
+All live under `packages/daemon/src/adapters/` (Architecture Rule 1: **0** files
+there import Hono, `git grep -l 'from "hono' -- packages/daemon/src/adapters | wc -l`).
+`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the six built-in
+classes cover **7** built-in runtime keys — `claude-code`, `codex`, `pi`, `omp`,
+`dsh`, `stub`, `terminal` (the two startup maps, `PodRigInstantiator`'s
+`adapters` and the relaunch/restore `runtimeAdapters` map; both are wrapped by
 `withCommunityHarnesses`/`withCommunityHarnessResolver`).
 
 ### Launch posture
@@ -360,6 +361,7 @@ resume launches (`codex-runtime-adapter.ts:378`, `codex-resume.ts:103`).
 - `PiRuntimeAdapter` (`pi-runtime-adapter.ts:64`), `runtime` `"pi"` (`:65`).
 - `OmpRuntimeAdapter` (`omp-runtime-adapter.ts:7`) extends it with
   `runtime = "omp"` (`:8`).
+- `DshRuntimeAdapter` (`dsh-runtime-adapter.ts:85`), `runtime` `"dsh"` (`:86`).
 - `StubRuntimeAdapter` (`stub-runtime-adapter.ts:69`), `runtime` defaulting to
   `"stub"` (`:81`).
 
@@ -375,9 +377,9 @@ exposes none), and returns the `DSH_PERMISSION_MODE` it emitted as its
 runner command and reports resumed only when the launch-scoped sidecar comes
 back ready on the exact requested session id.
 
-`createDaemon` constructs the adapters (`startup.ts:778`, `:779`, `:782`,
-`:783`, `:788`) and creates the terminal adapter inline in the runtime adapter
-maps (`startup.ts:989`, `:1259`); see `daemon-core.md` §4 "Startup sequence".
+`createDaemon` constructs the built-in adapters in `startup.ts` and creates the
+terminal adapter inline in the two runtime-adapter maps; see `daemon-core.md`
+§4 "Startup sequence".
 
 ### Terminal providers
 

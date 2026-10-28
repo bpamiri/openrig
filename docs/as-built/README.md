@@ -30,7 +30,8 @@ paths before a change, and [test-layers.md](test-layers.md) to choose checks.
 The npm workspaces are `packages/daemon`, `packages/cli`, `packages/tui`, and `packages/ui`
 ([root package manifest](../../package.json)). The daemon provides the SQLite-backed HTTP
 services; CLI, TUI and MCP clients consume them. Runtime adapters include Claude Code, Codex,
-Pi, OMP, terminal and stub implementations under `packages/daemon/src/adapters/`.
+Pi, OMP, DeepSeek Harness, terminal and stub implementations under `packages/daemon/src/adapters/`,
+plus `CommunityHarnessRuntimeAdapter` for preset harnesses.
 
 The CLI package contains the assembled daemon, TUI and web UI. User reference documents ship
 from `docs/reference/`; this as-built tree is developer documentation. The assembly is in

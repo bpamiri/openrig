@@ -47,11 +47,12 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 | `app.route(...)` mounts in `server.ts` | **69** | `grep -c 'app.route(' packages/daemon/src/server.ts` |
 | Top-level `rig` commands | **87** | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
 | MCP tools | **18**, all named `rig_*` | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
-| Runtime adapter classes | **6**: Claude Code, Codex, Pi, DeepSeek Harness, Stub, Terminal | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
+| Runtime adapter classes | **7** files: the six built-in classes (Claude Code, Codex, Pi, DeepSeek Harness, Stub, Terminal) plus `CommunityHarnessRuntimeAdapter` | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
 
-`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
-seven runtime keys — `claude-code`, `codex`, `pi`, `omp`, `dsh`, `stub`, `terminal`
-(`startup.ts`).
+`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so those six built-in
+classes cover seven built-in runtime keys — `claude-code`, `codex`, `pi`, `omp`,
+`dsh`, `stub`, `terminal` (`startup.ts`); `CommunityHarnessRuntimeAdapter` adds
+preset harnesses beside them.
 
 ### The stack
 

@@ -389,7 +389,7 @@ rig bundle install <bundle-path-or-github-link> [--plan] [--yes] [--target <root
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `<bundle-path-or-github-link>` | yes | — | Path to the `.rigbundle` file, or a GitHub folder link. |
-| `--plan` | no | `false` | Preview without installing or launching. Not side-effect free: it records a bootstrap run and runs the preflight, which for a pod-aware bundle runs `pi --version` or `omp --version` for Pi or OMP seats and `codex -p <profile> mcp list` for a Codex seat that names a `codex_config_profile`. It writes nothing to the target. |
+| `--plan` | no | `false` | Preview without installing or launching. Not side-effect free: it records a bootstrap run and runs the preflight, which for a pod-aware bundle runs `pi --version`, `omp --version` or `dsh --version` for Pi, OMP or DeepSeek Harness seats and `codex -p <profile> mcp list` for a Codex seat that names a `codex_config_profile`. It writes nothing to the target. |
 | `--yes` | no | `false` | Auto-approve trusted actions during apply mode. |
 | `--target <root>` | yes in apply mode, for an archive path | the current directory for a link | Directory the bundle is installed into and launched from. Required for an archive path unless `--plan` is used. |
 | `--cwd <dir>` | no | — | Working directory for every launched member, for this install only (for example, the repository the rig works on). Does not change the install target. |

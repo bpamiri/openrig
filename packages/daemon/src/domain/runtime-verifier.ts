@@ -165,7 +165,7 @@ export class RuntimeVerifier {
 
   /**
    * Shared helper: try `{binary} --version`, fall back to `{binary} --help`.
-   * Used by verifyClaude and verifyCodex.
+   * Used by the runtime verifiers (Claude, Codex, Pi, OMP and dsh).
    */
   private async verifyVersionOrHelp(binary: string, canonicalName: string): Promise<RuntimeVerification> {
     // Try --version first
