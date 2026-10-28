@@ -488,6 +488,9 @@ describe("runDshRunner setup (F1/F3/F4/F11/F12/F13)", () => {
     expect(states.some((state) => state.ready)).toBe(true);
     expect(c.rendered()).toContain(DSH_RUNNER_READY_MARKER);
     expect(c.rendered()).toContain("model: deepseek-v4-flash");
+    // F11: the session id is stored in the sidecar (the token store), never
+    // echoed into the captured pane.
+    expect(c.rendered()).not.toContain(SESSION_ID);
   });
 
   it("uses the setup-scoped timeout for every setup request", async () => {
@@ -533,6 +536,15 @@ describe("runDshRunner setup (F1/F3/F4/F11/F12/F13)", () => {
     expect(c.rendered()).not.toContain(DSH_RUNNER_READY_MARKER);
     expect(sidecarStates(c.writes).some((state) => state.ready)).toBe(false);
     expect(sidecarStates(c.writes).at(-1)?.exited?.error).toContain("model unavailable");
+  });
+
+  it("turns a timed-out setup request into setup-failed with no READY", async () => {
+    const c = runSetup({ client: new FakeAcpClient({ failInitialize: "initialize: timed out after 50ms" }) });
+    const result = await c.run;
+    expect(result.code).toBe(1);
+    expect(c.rendered()).not.toContain(DSH_RUNNER_READY_MARKER);
+    expect(sidecarStates(c.writes).at(-1)?.exited?.error).toContain("timed out");
+    expect(c.client.disposed).toBe(true);
   });
 
   it("refuses a dsh with a different ACP protocol version", async () => {
