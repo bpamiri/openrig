@@ -1,10 +1,10 @@
-export type RuntimeBrandId = "claude-code" | "codex" | "pi" | "omp" | "terminal" | "unknown";
+export type RuntimeBrandId = "claude-code" | "codex" | "pi" | "omp" | "dsh" | "terminal" | "unknown";
 
 export interface RuntimeBrand {
   id: RuntimeBrandId;
   label: string;
   shortLabel: string;
-  tone: "sand" | "green" | "slate" | "violet" | "neutral";
+  tone: "sand" | "green" | "slate" | "violet" | "teal" | "neutral";
 }
 
 const RUNTIME_BRANDS: Record<RuntimeBrandId, RuntimeBrand> = {
@@ -33,6 +33,13 @@ const RUNTIME_BRANDS: Record<RuntimeBrandId, RuntimeBrand> = {
     shortLabel: "OMP",
     tone: "violet",
   },
+  // OPR.0.6.DSH1 — the DeepSeek Harness, ACP-backed runtime.
+  dsh: {
+    id: "dsh",
+    label: "DeepSeek Harness",
+    shortLabel: "DSH",
+    tone: "teal",
+  },
   terminal: {
     id: "terminal",
     label: "Terminal",
@@ -54,6 +61,8 @@ export function normalizeRuntimeBrandId(runtime: string | null | undefined): Run
   // Exact/prefixed match only — never a bare `includes("pi")` (api/pilot/…).
   if (normalized === "pi" || normalized.startsWith("pi-")) return "pi";
   if (normalized === "omp" || normalized.startsWith("omp-") || normalized === "oh-my-pi") return "omp";
+  // Exact/prefixed match only — never a bare `includes("dsh")`.
+  if (normalized === "dsh" || normalized.startsWith("dsh-") || normalized === "deepseek-harness") return "dsh";
   if (normalized === "terminal" || normalized === "tmux" || normalized === "shell") return "terminal";
   return "unknown";
 }

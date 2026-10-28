@@ -40,6 +40,7 @@ const toneClass: Record<RuntimeBrandId, string> = {
   codex: "border-outline/50 bg-surface-lowest/75 text-on-surface",
   pi: "border-[#4c5b9e]/45 bg-[#5b6bb5]/[0.10] text-[#33406e]",
   omp: "border-[#773c99]/45 bg-[#8648ad]/[0.12] text-[#572875]",
+  dsh: "border-[#0f766e]/45 bg-[#14b8a6]/[0.12] text-[#115e59]",
   terminal: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
   unknown: "border-outline-variant bg-surface-lowest/55 text-on-surface-variant",
 };
@@ -49,6 +50,7 @@ const inlineToneClass: Record<RuntimeBrandId, string> = {
   codex: "text-on-surface",
   pi: "text-[#33406e]",
   omp: "text-[#572875]",
+  dsh: "text-[#115e59]",
   terminal: "text-on-surface",
   unknown: "text-on-surface-variant",
 };
@@ -122,6 +124,19 @@ function OmpGlyph({ className, title, decorative }: { className?: string; title:
       <rect x="1" y="1" width="14" height="14" rx="3" fill="#8648ad" />
       <path d="M3.5 5.2h9M5.6 5.2v5.5M9 5.2v5.5" fill="none" stroke="#faf4ff" strokeWidth="1.2" strokeLinecap="round" />
       <path d="m10.7 10.5.8.8 1.6-2" fill="none" stroke="#faf4ff" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// OPR.0.6.DSH1 — the DeepSeek Harness mark: a teal tile with a simple whale
+// silhouette, so it reads apart from Pi's indigo tile and OMP's violet one at
+// 16px.
+function DshGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2" y="2" width="12" height="12" rx="2.4" fill="#14b8a6" />
+      <path d="M3.4 8.2c1.1-1.9 2.7-2.8 4.6-2.8 1.7 0 3.1.6 4.2 1.9-.3.3-.7.5-1.1.5.3.7.3 1.5-.1 2.2-.5-.7-1.2-1.1-2-1.2-1.2-.1-2.2.5-2.7 1.6-.5-1-.6-2-.3-3-.9.2-1.7.5-2.6 1.1z" fill="#f0fdfa" />
+      <circle cx="6.1" cy="7.9" r=".55" fill="#0f766e" />
     </svg>
   );
 }
@@ -364,6 +379,7 @@ export function RuntimeMark({ runtime, size = "sm", className, title, decorative
   if (id === "codex") return <CodexGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "pi") return <PiGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "omp") return <OmpGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "dsh") return <DshGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
   return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }

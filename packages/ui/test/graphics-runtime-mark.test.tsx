@@ -14,6 +14,12 @@ describe("graphics runtime package", () => {
     expect(runtimeBrand("claude-code").label).toBe("Claude");
     expect(normalizeRuntimeBrandId("codex")).toBe("codex");
     expect(runtimeBrand("codex").label).toBe("Codex");
+    // OPR.0.6.DSH1 — the DeepSeek Harness gets its own mark, not "Unknown".
+    expect(normalizeRuntimeBrandId("dsh")).toBe("dsh");
+    expect(normalizeRuntimeBrandId("dsh-2")).toBe("dsh");
+    expect(runtimeBrand("dsh").shortLabel).toBe("DSH");
+    // Exact/prefixed only: `dsh` must not swallow an unrelated runtime string.
+    expect(normalizeRuntimeBrandId("dashboard")).toBe("unknown");
   });
 
   it("normalizes tool brands for CMUX, tmux, VS Code, and screenshots", () => {
